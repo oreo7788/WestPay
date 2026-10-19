@@ -1,0 +1,9 @@
+/data/
+/bin/
+/frontend/target/
+/frontend/dist/
+.DS_Store
+.env
+.env.*
+!.env.example
+/secrets/
