@@ -17,20 +17,16 @@ func (s *Store) dashboard(w http.ResponseWriter, r *http.Request, u User) error 
 	today := time.Now().Format("2006-01-02")
 	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
 	month := time.Now().Format("2006-01") + "-01"
-	scope := ""
-	scopeArgs := []any{}
-	if u.merchant() {
-		scope = " AND merchant_id=?"
-		scopeArgs = append(scopeArgs, u.MerchantID)
-	}
+	scope, scopeArgs := u.orderWhere("home", "o.")
+	scope = " AND " + scope
 	var amount, fee, monthAmount, yesterdayAmount int64
-	if e := s.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(status='已支付'),0),COALESCE(SUM(CASE WHEN status='已支付' THEN amount END),0),COALESCE(SUM(CASE WHEN status='已支付' THEN fee-cost END),0) FROM orders WHERE created_at>=?`+scope, append([]any{today}, scopeArgs...)...).Scan(&d.TodayOrders, &d.TodaySuccess, &amount, &fee); e != nil {
+	if e := s.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(status='已支付'),0),COALESCE(SUM(CASE WHEN status='已支付' THEN amount END),0),COALESCE(SUM(CASE WHEN status='已支付' THEN fee-cost END),0) FROM orders o WHERE created_at>=?`+scope, append([]any{today}, scopeArgs...)...).Scan(&d.TodayOrders, &d.TodaySuccess, &amount, &fee); e != nil {
 		return e
 	}
-	if e := s.db.QueryRow("SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='已支付' AND created_at>=?"+scope, append([]any{month}, scopeArgs...)...).Scan(&monthAmount); e != nil {
+	if e := s.db.QueryRow("SELECT COALESCE(SUM(amount),0) FROM orders o WHERE status='已支付' AND created_at>=?"+scope, append([]any{month}, scopeArgs...)...).Scan(&monthAmount); e != nil {
 		return e
 	}
-	if e := s.db.QueryRow("SELECT COUNT(*),COALESCE(SUM(CASE WHEN status='已支付' THEN amount END),0) FROM orders WHERE created_at>=? AND created_at<?"+scope, append([]any{yesterday, today}, scopeArgs...)...).Scan(&d.Yesterday, &yesterdayAmount); e != nil {
+	if e := s.db.QueryRow("SELECT COUNT(*),COALESCE(SUM(CASE WHEN status='已支付' THEN amount END),0) FROM orders o WHERE created_at>=? AND created_at<?"+scope, append([]any{yesterday, today}, scopeArgs...)...).Scan(&d.Yesterday, &yesterdayAmount); e != nil {
 		return e
 	}
 	d.TodayAmount = float64(amount) / 100
@@ -43,25 +39,151 @@ func (s *Store) dashboard(w http.ResponseWriter, r *http.Request, u User) error 
 	if d.TodayOrders > 0 {
 		d.SuccessRate = float64(d.TodaySuccess) * 100 / float64(d.TodayOrders)
 	}
-	rows, e := s.db.Query("SELECT CAST(substr(created_at,12,2) AS INTEGER)/2,SUM(amount) FROM orders WHERE status='已支付' AND created_at>=?"+scope+" GROUP BY 1", append([]any{today}, scopeArgs...)...)
+	rows, e := s.db.Query("SELECT CAST(substr(created_at,12,2) AS INTEGER)/2,SUM(amount) FROM orders o WHERE status='已支付' AND created_at>=?"+scope+" GROUP BY 1", append([]any{today}, scopeArgs...)...)
 	if e != nil {
 		return e
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var index int
 		var n int64
 		if e = rows.Scan(&index, &n); e != nil {
+			rows.Close()
 			return e
 		}
 		if index >= 0 && index < 12 {
 			d.Trend[index] = float64(n) / 100
 		}
 	}
-	if e = rows.Err(); e != nil {
+	e = rows.Err()
+	rows.Close()
+	if e != nil {
 		return e
 	}
-	writeJSON(w, 200, d)
+	// Homepage panels have independent grants. Never return ungranted panel data.
+	out := map[string]any{}
+	allowed := func(key string) bool {
+		for _, p := range permissionCatalog() {
+			if p.Code == "home."+key {
+				return u.can("home.view") && u.can(p.Code) && (!u.merchant() || p.Merchant)
+			}
+		}
+		return false
+	}
+	for _, field := range []struct {
+		permission, key string
+		value           any
+	}{
+		{"today_orders", "todayOrders", d.TodayOrders},
+		{"today_success", "todaySuccess", d.TodaySuccess},
+		{"today_amount", "todayAmount", d.TodayAmount},
+		{"success_rate", "successRate", d.SuccessRate},
+		{"profit", "todayProfit", d.TodayProfit},
+		{"month_amount", "monthAmount", d.MonthAmount},
+		{"yesterday_orders", "yesterdayOrders", d.Yesterday},
+		{"yesterday_amount", "yesterdayAmount", d.YesterdayAmount},
+		{"trend", "trend", d.Trend},
+	} {
+		if allowed(field.permission) {
+			out[field.key] = field.value
+		}
+	}
+	for _, count := range []struct{ permission, key, table string }{
+		{"channel_count", "channelCount", "channels"},
+		{"merchant_count", "merchantCount", "merchants"},
+	} {
+		if allowed(count.permission) {
+			var n int
+			merchantExpr := ""
+			if count.table == "merchants" {
+				merchantExpr = "id"
+			}
+			visible, args := u.dataWhere("home", count.table, "id", merchantExpr)
+			if e := s.db.QueryRow("SELECT COUNT(*) FROM "+count.table+" WHERE "+visible, args...).Scan(&n); e != nil {
+				return e
+			}
+			out[count.key] = n
+		}
+	}
+	if allowed("channels") {
+		items := []map[string]any{}
+		channelScope, channelArgs := u.dataWhere("home", "channels", "c.id", "")
+		orderScope, orderArgs := u.orderWhere("home", "o.")
+		args := append([]any{today}, orderArgs...)
+		args = append(args, channelArgs...)
+		rows, e := s.db.Query(`SELECT c.id,c.name,c.method,c.enabled,COALESCE(SUM(CASE WHEN o.status='已支付' THEN o.amount ELSE 0 END),0) FROM channels c LEFT JOIN orders o ON o.channel_id=c.id AND o.created_at>=? AND `+orderScope+` WHERE `+channelScope+` GROUP BY c.id ORDER BY c.id`, args...)
+		if e != nil {
+			return e
+		}
+		for rows.Next() {
+			var id, name, method string
+			var enabled bool
+			var amount int64
+			if e = rows.Scan(&id, &name, &method, &enabled, &amount); e != nil {
+				rows.Close()
+				return e
+			}
+			items = append(items, map[string]any{"id": id, "name": name, "method": method, "enabled": enabled, "todayAmount": float64(amount) / 100})
+		}
+		e = rows.Err()
+		rows.Close()
+		if e != nil {
+			return e
+		}
+		out["channels"] = items
+	}
+	if allowed("merchant_ranking") {
+		items := []map[string]any{}
+		merchantScope, merchantArgs := u.dataWhere("home", "merchants", "m.id", "m.id")
+		orderScope, orderArgs := u.orderWhere("home", "o.")
+		args := append([]any{today}, orderArgs...)
+		args = append(args, merchantArgs...)
+		rows, e := s.db.Query(`SELECT m.id,m.name,COUNT(o.id),COALESCE(SUM(o.status='已支付'),0),COALESCE(SUM(CASE WHEN o.status='已支付' THEN o.amount ELSE 0 END),0) FROM merchants m LEFT JOIN orders o ON o.merchant_id=m.id AND o.created_at>=? AND `+orderScope+` WHERE `+merchantScope+` GROUP BY m.id ORDER BY COUNT(o.id) DESC,m.id LIMIT 10`, args...)
+		if e != nil {
+			return e
+		}
+		for rows.Next() {
+			var id, name string
+			var count, success int
+			var amount int64
+			var rate float64
+			if e = rows.Scan(&id, &name, &count, &success, &amount); e != nil {
+				rows.Close()
+				return e
+			}
+			if count > 0 {
+				rate = float64(success) * 100 / float64(count)
+			}
+			items = append(items, map[string]any{"id": id, "name": name, "todayCount": count, "todayRate": rate, "todayAmount": float64(amount) / 100})
+		}
+		e = rows.Err()
+		rows.Close()
+		if e != nil {
+			return e
+		}
+		out["merchantRanking"] = items
+	}
+	if allowed("latest_orders") {
+		items := []PaymentOrder{}
+		rows, e := s.db.Query(orderSelect+" WHERE o.created_at>=?"+scope+" ORDER BY o.created_at DESC,o.rowid DESC LIMIT 5", append([]any{today}, scopeArgs...)...)
+		if e != nil {
+			return e
+		}
+		for rows.Next() {
+			item, e := scanOrder(rows)
+			if e != nil {
+				rows.Close()
+				return e
+			}
+			items = append(items, redactOrder(u, item))
+		}
+		e = rows.Err()
+		rows.Close()
+		if e != nil {
+			return e
+		}
+		out["latestOrders"] = items
+	}
+	writeJSON(w, 200, out)
 	return nil
 }
 func (s *Store) finance(w http.ResponseWriter, r *http.Request, u User) error {
@@ -73,10 +195,17 @@ func (s *Store) finance(w http.ResponseWriter, r *http.Request, u User) error {
 	if kind == "prepay" {
 		alias = "l"
 	}
-	if u.merchant() {
-		where += " AND " + alias + ".merchant_id=?"
-		args = append(args, u.MerchantID)
+	page, e := financePermissionPage(r)
+	if e != nil {
+		return e
 	}
+	resource := "orders"
+	if kind == "prepay" {
+		resource = "ledger"
+	}
+	scope, scopeArgs := u.dataWhere(page, resource, alias+".id", alias+".merchant_id")
+	where += " AND " + scope
+	args = append(args, scopeArgs...)
 	if from := r.URL.Query().Get("from"); from != "" {
 		if _, e := time.Parse("2006-01-02", from); e != nil {
 			return bad("开始日期无效")

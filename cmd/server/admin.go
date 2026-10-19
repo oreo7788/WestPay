@@ -9,15 +9,16 @@ import (
 )
 
 type Record struct {
-	ID        string  `json:"id"`
-	Kind      string  `json:"kind"`
-	Name      string  `json:"name"`
-	Reference string  `json:"reference"`
-	Amount    float64 `json:"amount"`
-	Status    string  `json:"status"`
-	Note      string  `json:"note"`
-	CreatedAt string  `json:"createdAt"`
-	UpdatedAt string  `json:"updatedAt"`
+	ID         string  `json:"id"`
+	Kind       string  `json:"kind"`
+	MerchantID string  `json:"merchantId"`
+	Name       string  `json:"name"`
+	Reference  string  `json:"reference"`
+	Amount     float64 `json:"amount"`
+	Status     string  `json:"status"`
+	Note       string  `json:"note"`
+	CreatedAt  string  `json:"createdAt"`
+	UpdatedAt  string  `json:"updatedAt"`
 }
 
 var recordKinds = map[string][]string{"complaints": {"待处理", "处理中", "已解决", "已撤销"}, "transfers": {"待付款", "已付款", "失败", "已取消"}, "receivers": {"启用", "停用"}, "official": {"启用", "停用"}, "blacklist": {"生效", "停用"}, "user_ids": {"有效", "停用"}}
@@ -27,7 +28,8 @@ func (s *Store) listRecords(w http.ResponseWriter, r *http.Request, u User) erro
 	if _, ok := recordKinds[kind]; !ok {
 		return notfound("记录类型不存在")
 	}
-	rows, e := s.db.Query("SELECT id,kind,name,reference,amount,status,note,created_at,updated_at FROM records WHERE kind=? ORDER BY created_at DESC", kind)
+	scope, args := u.dataWhere(kind, kind, "id", "")
+	rows, e := s.db.Query("SELECT id,kind,name,reference,amount,status,note,created_at,updated_at,COALESCE((SELECT merchant_id FROM data_merchant_links ds WHERE ds.resource=records.kind AND ds.record_id=records.id),'') FROM records WHERE kind=? AND "+scope+" ORDER BY created_at DESC", append([]any{kind}, args...)...)
 	if e != nil {
 		return e
 	}
@@ -36,7 +38,7 @@ func (s *Store) listRecords(w http.ResponseWriter, r *http.Request, u User) erro
 	for rows.Next() {
 		var b Record
 		var n int64
-		if e = rows.Scan(&b.ID, &b.Kind, &b.Name, &b.Reference, &n, &b.Status, &b.Note, &b.CreatedAt, &b.UpdatedAt); e != nil {
+		if e = rows.Scan(&b.ID, &b.Kind, &b.Name, &b.Reference, &n, &b.Status, &b.Note, &b.CreatedAt, &b.UpdatedAt, &b.MerchantID); e != nil {
 			return e
 		}
 		b.Amount = float64(n) / 100
@@ -45,7 +47,7 @@ func (s *Store) listRecords(w http.ResponseWriter, r *http.Request, u User) erro
 	if e = rows.Err(); e != nil {
 		return e
 	}
-	writeJSON(w, 200, out)
+	writeJSON(w, 200, filterKeyword(r, out))
 	return nil
 }
 func (s *Store) saveRecord(w http.ResponseWriter, r *http.Request, u User) error {
@@ -80,6 +82,12 @@ func (s *Store) saveRecord(w http.ResponseWriter, r *http.Request, u User) error
 	}
 	b.Kind = kind
 	e = s.transaction(func(tx *sql.Tx) error {
+		if e := s.recordMerchant(tx, &b, r.Method == "POST"); e != nil {
+			return e
+		}
+		if r.Method == "POST" && !u.creationAllowed(kind, b.MerchantID) {
+			return forbid()
+		}
 		var result sql.Result
 		var err error
 		if r.Method == "POST" {
@@ -96,6 +104,11 @@ func (s *Store) saveRecord(w http.ResponseWriter, r *http.Request, u User) error
 		count, _ := result.RowsAffected()
 		if count == 0 {
 			return notfound("记录不存在")
+		}
+		if r.Method == "POST" {
+			if e := linkMerchant(tx, kind, b.ID, b.MerchantID); e != nil {
+				return e
+			}
 		}
 		return s.audit(tx, u, r, "保存"+kind, b.ID, b.Status)
 	})
@@ -195,7 +208,8 @@ func (s *Store) saveSettings(w http.ResponseWriter, r *http.Request, u User) err
 	return nil
 }
 func (s *Store) listAudit(w http.ResponseWriter, r *http.Request, u User) error {
-	rows, e := s.db.Query("SELECT id,actor,action,target,detail,ip,created_at FROM audit ORDER BY id DESC LIMIT 500")
+	scope, args := u.dataWhere("logs", "audit", "CAST(id AS TEXT)", "")
+	rows, e := s.db.Query("SELECT id,actor,action,target,detail,ip,created_at FROM audit WHERE "+scope+" ORDER BY id DESC LIMIT 500", args...)
 	if e != nil {
 		return e
 	}

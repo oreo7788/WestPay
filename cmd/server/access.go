@@ -32,6 +32,28 @@ func permissionCatalog() []Permission {
 		}
 	}
 	add("home", "首页", true)
+	for _, panel := range []struct {
+		key, name string
+		merchant  bool
+	}{
+		{"notice", "运行提示", true},
+		{"today_orders", "今日充值", true},
+		{"today_success", "成交笔数", true},
+		{"today_amount", "成交金额", true},
+		{"success_rate", "成功率", true},
+		{"profit", "平台利润", false},
+		{"month_amount", "当月成交金额", true},
+		{"yesterday_orders", "昨日下单笔数", true},
+		{"yesterday_amount", "昨日成交金额", true},
+		{"channel_count", "今日通道数", false},
+		{"merchant_count", "商户数量", false},
+		{"trend", "近 12 时段成交趋势", true},
+		{"channels", "当天通道统计", false},
+		{"latest_orders", "最新收款订单", true},
+		{"merchant_ranking", "当天商户排行", false},
+	} {
+		out = append(out, Permission{"home." + panel.key, "首页：" + panel.name, "home", panel.merchant, []string{"home.view"}})
+	}
 	add("orders", "收款订单", true, "qr", "query", "export")
 	// Creating orders remains internal until merchant-owned channel onboarding is implemented.
 	out = append(out, Permission{"orders.create", "收款订单：新增", "orders", false, []string{"orders.view"}}, Permission{"orders.simulate", "收款订单：模拟支付结果", "orders", false, []string{"orders.view"}})
@@ -50,6 +72,17 @@ func permissionCatalog() []Permission {
 	}
 	for _, x := range []struct{ key, name string }{{"methods", "支付方式"}, {"plugins", "支付插件"}, {"robot", "机器人说明"}, {"logs", "操作日志"}} {
 		add(x.key, x.name, false)
+	}
+	pages := map[string]string{}
+	for _, p := range out {
+		if strings.HasSuffix(p.Code, ".view") {
+			pages[p.Page] = strings.TrimSuffix(p.Name, "：查看")
+		}
+	}
+	for _, page := range []string{"orders", "history", "merchants", "products", "channels", "merchant_settlement", "finance_channels", "finance_products", "finance_merchants", "prepay", "statistics", "receivers", "complaints", "official", "blacklist", "transfers", "user_ids"} {
+		for _, f := range queryFilters(page) {
+			out = append(out, Permission{page + "." + f.Key, pages[page] + "：" + f.Name, page, f.Merchant, []string{page + ".view"}})
+		}
 	}
 	return out
 }
@@ -186,7 +219,6 @@ func (s *Store) loadAccess(u *User) error {
 	if e != nil {
 		return e
 	}
-	defer rows.Close()
 	allowed := map[string]bool{}
 	for _, p := range permissionCatalog() {
 		if !u.merchant() || p.Merchant {
@@ -196,19 +228,26 @@ func (s *Store) loadAccess(u *User) error {
 	for rows.Next() {
 		var p string
 		if e = rows.Scan(&p); e != nil {
+			rows.Close()
 			return e
 		}
 		if allowed[p] {
 			u.Permissions = append(u.Permissions, p)
 		}
 	}
-	return rows.Err()
+	e = rows.Err()
+	rows.Close()
+	if e != nil {
+		return e
+	}
+	return s.loadUserScopes(u)
 }
 func forbid() error { return apiError{403, "没有执行此操作的权限"} }
 func (s *Store) authorize(r *http.Request, u User) error {
 	path := r.URL.Path
 	read := r.Method == "GET" || r.Method == "HEAD"
 	need := []string{}
+	queryPage := ""
 	switch {
 	case strings.HasPrefix(path, "/api/access/"), strings.HasPrefix(path, "/api/users"):
 		if !u.Super {
@@ -221,8 +260,10 @@ func (s *Store) authorize(r *http.Request, u User) error {
 		need = []string{"home.view"}
 	case path == "/api/payments":
 		if read {
+			queryPage = "orders"
 			if r.URL.Query().Get("archive") == "true" {
 				need = []string{"history.view"}
+				queryPage = "history"
 			} else {
 				need = []string{"orders.view"}
 			}
@@ -256,6 +297,9 @@ func (s *Store) authorize(r *http.Request, u User) error {
 		if !u.can(prefix + ".view") {
 			return forbid()
 		}
+		if e := s.requireData(u, prefix, "orders", "orders", "id", r.PathValue("id"), "merchant_id"); e != nil {
+			return e
+		}
 		switch {
 		case strings.HasSuffix(path, "/qrcode"), strings.HasSuffix(path, "/checkout"):
 			need = []string{prefix + ".qr"}
@@ -268,7 +312,8 @@ func (s *Store) authorize(r *http.Request, u User) error {
 		}
 
 	case path == "/api/merchants" && read:
-		need = []string{"merchants.view", "home.view", "orders.create"}
+		need = []string{"merchants.view", "orders.create"}
+		queryPage = "merchants"
 	case strings.HasPrefix(path, "/api/merchants"):
 		switch {
 		case strings.Contains(path, "/api-key"):
@@ -284,6 +329,7 @@ func (s *Store) authorize(r *http.Request, u User) error {
 		}
 	case path == "/api/products" && read:
 		need = []string{"products.view", "orders.create"}
+		queryPage = "products"
 	case strings.HasPrefix(path, "/api/products"):
 		if r.Method == "POST" {
 			need = []string{"products.create"}
@@ -292,6 +338,7 @@ func (s *Store) authorize(r *http.Request, u User) error {
 		}
 	case path == "/api/channels" && read:
 		need = []string{"channels.view", "orders.create"}
+		queryPage = "channels"
 	case strings.HasPrefix(path, "/api/channels"):
 		if strings.HasSuffix(path, "/toggle") {
 			need = []string{"channels.toggle"}
@@ -301,14 +348,13 @@ func (s *Store) authorize(r *http.Request, u User) error {
 			need = []string{"channels.edit"}
 		}
 	case strings.HasPrefix(path, "/api/finance/"):
-		page := map[string]string{"channels": "finance_channels", "products": "finance_products", "merchants": "finance_merchants", "prepay": "prepay", "statistics": "statistics"}[r.PathValue("kind")]
-		if page == "" {
-			return notfound("报表不存在")
+		page, e := financePermissionPage(r)
+		if e != nil {
+			return e
 		}
 		need = []string{page + ".view"}
-		if page == "finance_merchants" {
-			need = append(need, "merchant_settlement.view")
-		}
+		queryPage = page
+
 	case path == "/api/settings":
 		suffix := ".view"
 		if !read {
@@ -333,6 +379,9 @@ func (s *Store) authorize(r *http.Request, u User) error {
 			}
 		}
 		need = []string{kind + suffix}
+		if read {
+			queryPage = kind
+		}
 	default:
 		return forbid()
 	}
@@ -357,7 +406,7 @@ func (s *Store) authorize(r *http.Request, u User) error {
 			return forbid()
 		}
 	}
-	return nil
+	return authorizeQuery(r, u, queryPage)
 }
 func redactOrder(u User, o PaymentOrder) PaymentOrder {
 	prefix := "orders"
@@ -378,6 +427,8 @@ type AccessRole struct {
 	Identity    string   `json:"identity"`
 	Enabled     bool     `json:"enabled"`
 	Permissions []string `json:"permissions"`
+	DataScope   string   `json:"dataScope"`
+	MerchantIDs []string `json:"merchantIds"`
 }
 
 func (s *Store) accessCatalog(w http.ResponseWriter, r *http.Request, u User) error {
@@ -405,6 +456,9 @@ func (s *Store) listRoles(w http.ResponseWriter, r *http.Request, u User) error 
 		return e
 	}
 	for i := range out {
+		if e := s.loadRoleScope(&out[i]); e != nil {
+			return e
+		}
 		rows, e := s.db.Query("SELECT permission FROM role_permissions WHERE role_id=? ORDER BY permission", out[i].ID)
 		if e != nil {
 			return e
@@ -465,10 +519,13 @@ func (s *Store) saveRole(w http.ResponseWriter, r *http.Request, u User) error {
 		b.ID = id("R-")
 	}
 	e := s.transaction(func(tx *sql.Tx) error {
+		if e := s.validateRoleScope(tx, &b); e != nil {
+			return e
+		}
 		var old any
 		if !creating {
 			var x AccessRole
-			if e := tx.QueryRow("SELECT id,name,identity,enabled FROM access_roles WHERE id=?", b.ID).Scan(&x.ID, &x.Name, &x.Identity, &x.Enabled); e == sql.ErrNoRows {
+			if e := tx.QueryRow("SELECT id,name,identity,enabled,COALESCE((SELECT mode FROM role_data_scope WHERE role_id=access_roles.id),'own_merchant') FROM access_roles WHERE id=?", b.ID).Scan(&x.ID, &x.Name, &x.Identity, &x.Enabled, &x.DataScope); e == sql.ErrNoRows {
 				return notfound("角色不存在")
 			} else if e != nil {
 				return e
@@ -491,6 +548,24 @@ func (s *Store) saveRole(w http.ResponseWriter, r *http.Request, u User) error {
 			}
 			e = rows.Err()
 			rows.Close()
+			if e != nil {
+				return e
+			}
+			x.MerchantIDs = []string{}
+			mids, e := tx.Query("SELECT merchant_id FROM role_scope_merchants WHERE role_id=? ORDER BY merchant_id", b.ID)
+			if e != nil {
+				return e
+			}
+			for mids.Next() {
+				var mid string
+				if e = mids.Scan(&mid); e != nil {
+					mids.Close()
+					return e
+				}
+				x.MerchantIDs = append(x.MerchantIDs, mid)
+			}
+			e = mids.Err()
+			mids.Close()
 			if e != nil {
 				return e
 			}
@@ -517,6 +592,17 @@ func (s *Store) saveRole(w http.ResponseWriter, r *http.Request, u User) error {
 		}
 		for _, code := range b.Permissions {
 			if _, e := tx.Exec("INSERT INTO role_permissions VALUES(?,?)", b.ID, code); e != nil {
+				return e
+			}
+		}
+		if _, e := tx.Exec("INSERT INTO role_data_scope VALUES(?,?) ON CONFLICT(role_id) DO UPDATE SET mode=excluded.mode", b.ID, b.DataScope); e != nil {
+			return e
+		}
+		if _, e := tx.Exec("DELETE FROM role_scope_merchants WHERE role_id=?", b.ID); e != nil {
+			return e
+		}
+		for _, mid := range b.MerchantIDs {
+			if _, e := tx.Exec("INSERT INTO role_scope_merchants VALUES(?,?)", b.ID, mid); e != nil {
 				return e
 			}
 		}

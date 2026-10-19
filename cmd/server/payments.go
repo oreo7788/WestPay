@@ -61,6 +61,9 @@ func (s *Store) createPayment(w http.ResponseWriter, r *http.Request, u User) er
 	if err := decode(w, r, &b); err != nil {
 		return err
 	}
+	if !u.creationAllowed("orders", b.MerchantID) {
+		return forbid()
+	}
 	o, _, err := s.createOrder(r, u, b, false)
 	if err != nil {
 		return err
@@ -195,6 +198,22 @@ func (s *Store) listPayments(w http.ResponseWriter, r *http.Request, u User) err
 		args = append(args, u.MerchantID)
 	}
 	v := r.URL.Query()
+	pageScope := "orders"
+	if v.Get("archive") == "true" {
+		pageScope = "history"
+	}
+	visibility, scopeArgs := u.orderWhere(pageScope, "o.")
+	if v.Get("all") == "true" && v.Get("archive") != "true" {
+		current, ca := u.orderWhere("orders", "o.")
+		history, ha := u.orderWhere("history", "o.")
+		visibility = "((o.created_at>=? AND " + current + ") OR (o.created_at<? AND " + history + "))"
+		today := time.Now().Format("2006-01-02")
+		scopeArgs = append([]any{today}, ca...)
+		scopeArgs = append(scopeArgs, today)
+		scopeArgs = append(scopeArgs, ha...)
+	}
+	clauses = append(clauses, visibility)
+	args = append(args, scopeArgs...)
 	if v.Get("archive") == "true" {
 		clauses = append(clauses, "o.created_at < ?")
 		args = append(args, time.Now().Format("2006-01-02"))
@@ -202,11 +221,15 @@ func (s *Store) listPayments(w http.ResponseWriter, r *http.Request, u User) err
 		clauses = append(clauses, "o.created_at >= ?")
 		args = append(args, time.Now().Format("2006-01-02"))
 	}
-	if q := strings.TrimSpace(v.Get("q")); q != "" {
-		clauses = append(clauses, "(o.id LIKE ? OR o.merchant_order LIKE ? OR m.name LIKE ? OR m.id LIKE ?)")
-		for i := 0; i < 4; i++ {
-			args = append(args, "%"+q+"%")
+	for _, f := range []struct{ key, col string }{{"systemId", "o.id"}, {"merchantOrder", "o.merchant_order"}} {
+		if value := strings.TrimSpace(v.Get(f.key)); value != "" {
+			clauses = append(clauses, "instr(lower("+f.col+"),lower(?))>0")
+			args = append(args, value)
 		}
+	}
+	if value := strings.TrimSpace(v.Get("merchant")); value != "" {
+		clauses = append(clauses, "(instr(lower(m.name),lower(?))>0 OR instr(lower(m.id),lower(?))>0)")
+		args = append(args, value, value)
 	}
 	for _, f := range []struct{ key, col, all string }{{"status", "o.status", "全部状态"}, {"method", "c.method", "所有支付方式"}, {"merchantId", "o.merchant_id", ""}, {"channelId", "o.channel_id", ""}} {
 		if x := v.Get(f.key); x != "" && x != f.all {
@@ -413,11 +436,26 @@ func (s *Store) simulatePayment(w http.ResponseWriter, r *http.Request, u User) 
 	return nil
 }
 func (s *Store) listMerchants(w http.ResponseWriter, r *http.Request, u User) error {
-	where := ""
-	args := []any{}
+	page := "merchants"
+	if !u.can("merchants.view") && u.can("orders.create") {
+		page = "order_lookup"
+	}
+	scope, args := u.dataWhere(page, "merchants", "id", "id")
+	where := " WHERE " + scope
 	if u.merchant() {
-		where = " WHERE id=?"
+		where += " AND id=?"
 		args = append(args, u.MerchantID)
+	}
+	if value := r.URL.Query().Get("enabled"); value != "" {
+		if value != "true" && value != "false" {
+			return bad("商户状态无效")
+		}
+		if where == "" {
+			where = " WHERE enabled=?"
+		} else {
+			where += " AND enabled=?"
+		}
+		args = append(args, value == "true")
 	}
 	rows, e := s.db.Query("SELECT id,name,balance,total_prepay,enabled FROM merchants"+where+" ORDER BY created_at DESC", args...)
 	if e != nil {
@@ -458,7 +496,7 @@ func (s *Store) listMerchants(w http.ResponseWriter, r *http.Request, u User) er
 			return e
 		}
 	}
-	writeJSON(w, 200, out)
+	writeJSON(w, 200, filterKeyword(r, out))
 	return nil
 }
 func (s *Store) createMerchant(w http.ResponseWriter, r *http.Request, u User) error {
@@ -481,6 +519,9 @@ func (s *Store) createMerchant(w http.ResponseWriter, r *http.Request, u User) e
 		return forbid()
 	}
 	mid := id("M-")
+	if !u.creationAllowed("merchants", mid) {
+		return forbid()
+	}
 	e = s.transaction(func(tx *sql.Tx) error {
 		if _, e := tx.Exec("INSERT INTO merchants VALUES(?,?,?,?,?,?)", mid, b.Name, n, n, true, timestamp()); e != nil {
 			return e
@@ -619,7 +660,12 @@ func (s *Store) toggle(w http.ResponseWriter, r *http.Request, u User, table, la
 	return nil
 }
 func (s *Store) listProducts(w http.ResponseWriter, r *http.Request, u User) error {
-	rows, e := s.db.Query("SELECT code,name,fee_bps,method,enabled FROM products ORDER BY code")
+	page := "products"
+	if !u.can("products.view") && u.can("orders.create") {
+		page = "order_lookup"
+	}
+	scope, args := u.dataWhere(page, "products", "code", "")
+	rows, e := s.db.Query("SELECT code,name,fee_bps,method,enabled FROM products WHERE "+scope+" ORDER BY code", args...)
 	if e != nil {
 		return e
 	}
@@ -637,7 +683,7 @@ func (s *Store) listProducts(w http.ResponseWriter, r *http.Request, u User) err
 	if e = rows.Err(); e != nil {
 		return e
 	}
-	writeJSON(w, 200, out)
+	writeJSON(w, 200, filterKeyword(r, out))
 	return nil
 }
 func (s *Store) saveProduct(w http.ResponseWriter, r *http.Request, u User) error {
@@ -701,6 +747,11 @@ func (s *Store) saveProduct(w http.ResponseWriter, r *http.Request, u User) erro
 		if err != nil {
 			return err
 		}
+		if r.Method == "POST" {
+			if !u.creationAllowed("products", "") {
+				return forbid()
+			}
+		}
 		return s.audit(tx, u, r, "保存产品", p.Code, p.Name)
 	})
 	if e != nil {
@@ -710,7 +761,12 @@ func (s *Store) saveProduct(w http.ResponseWriter, r *http.Request, u User) erro
 	return nil
 }
 func (s *Store) listChannels(w http.ResponseWriter, r *http.Request, u User) error {
-	rows, e := s.db.Query("SELECT id,name,fee_bps,min_cents,max_cents,method,plugin,enabled FROM channels ORDER BY id")
+	page := "channels"
+	if !u.can("channels.view") && u.can("orders.create") {
+		page = "order_lookup"
+	}
+	scope, args := u.dataWhere(page, "channels", "id", "")
+	rows, e := s.db.Query("SELECT id,name,fee_bps,min_cents,max_cents,method,plugin,enabled FROM channels WHERE "+scope+" ORDER BY id", args...)
 	if e != nil {
 		return e
 	}
@@ -742,7 +798,7 @@ func (s *Store) listChannels(w http.ResponseWriter, r *http.Request, u User) err
 		out[i].TodayAmount = float64(a) / 100
 		out[i].Yesterday = float64(b) / 100
 	}
-	writeJSON(w, 200, out)
+	writeJSON(w, 200, filterKeyword(r, out))
 	return nil
 }
 func (s *Store) saveChannel(w http.ResponseWriter, r *http.Request, u User) error {
@@ -818,6 +874,11 @@ func (s *Store) saveChannel(w http.ResponseWriter, r *http.Request, u User) erro
 		}
 		if e != nil {
 			return e
+		}
+		if r.Method == "POST" {
+			if !u.creationAllowed("channels", "") {
+				return forbid()
+			}
 		}
 		return s.audit(tx, u, r, "保存通道", c.ID, c.Name)
 	})

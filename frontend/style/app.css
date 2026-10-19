@@ -19,3 +19,7 @@
 .permission-actions { display: flex; flex-wrap: wrap; }
 .permission-toolbar { display: flex; gap: 16px; }
 @media (max-width: 700px) { .permission-tree { grid-template-columns: 1fr; } }
+
+.metric-grid.home-metrics{grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}.summary-strip.home-summary{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));row-gap:15px}.dashboard-grid.home-panels{grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr))}.chart-panel{padding-bottom:36px}
+
+.scope-merchants{max-height:180px;overflow:auto;margin-top:10px}.scope-merchants .permission-choice{max-width:100%;overflow-wrap:anywhere}

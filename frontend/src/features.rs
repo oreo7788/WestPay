@@ -16,6 +16,7 @@ pub struct User {
     pub super_user: bool,
     pub role_ids: Vec<String>,
     pub permissions: Vec<String>,
+    pub data_scopes: Value,
     pub name: String,
     pub role: String,
 }
@@ -111,7 +112,7 @@ fn select(key: &'static str, label: &'static str, options: &'static str) -> Fiel
     }
 }
 fn fields(kind: &str) -> Vec<Field> {
-    match kind {
+    let mut fields = match kind {
         "products" => vec![
             f("code", "产品编码", "text"),
             f("name", "产品名称", "text"),
@@ -146,7 +147,11 @@ fn fields(kind: &str) -> Vec<Field> {
             select("status", "状态", statuses(kind)),
             f("note", "备注 / 处理说明", "text"),
         ],
+    };
+    if !["products", "channels"].contains(&kind) {
+        fields.insert(0, f("merchantId", "归属商户号（可选）", "text"));
     }
+    fields
 }
 fn statuses(kind: &str) -> &'static str {
     match kind {
@@ -212,9 +217,14 @@ fn display(v: &Value, key: &str) -> String {
         _ => text(v, key),
     }
 }
-fn load(kind: &'static str, rows: RwSignal<Vec<Value>>, error: RwSignal<String>) {
+fn load(kind: &'static str, rows: RwSignal<Vec<Value>>, error: RwSignal<String>, query: String) {
     spawn_local(async move {
-        match api("GET", &endpoint(kind), None).await {
+        let url = if query.trim().is_empty() {
+            endpoint(kind)
+        } else {
+            format!("{}?q={}", endpoint(kind), crate::url_encode(query.trim()))
+        };
+        match api("GET", &url, None).await {
             Ok(v) => rows.set(v.as_array().cloned().unwrap_or_default()),
             Err(e) => error.set(e),
         }
@@ -230,7 +240,18 @@ pub fn ManagedPage(kind: &'static str, readonly: bool) -> impl IntoView {
     let notice = RwSignal::new(String::new());
     let query = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
-    Effect::new(move |_| load(kind, rows, error));
+    Effect::new(move |_| {
+        load(
+            kind,
+            rows,
+            error,
+            if access.can(&format!("{kind}.filter_keyword")) {
+                query.get()
+            } else {
+                String::new()
+            },
+        )
+    });
     let specs = fields(kind);
     let columns = fields(kind)
         .into_iter()
@@ -240,10 +261,10 @@ pub fn ManagedPage(kind: &'static str, readonly: bool) -> impl IntoView {
     let form_fields = specs.clone();
     view! {<div class="page-heading"><div><h1>{title(kind)}</h1><p>{match kind{"channels"=>"配置费率、支付方式、限额和启停状态。","products"=>"费率更新只影响新订单；历史订单保留原手续费。","transfers"=>"登记线下付款流水与状态，保存不会发起转账。","blacklist"=>"名称填写商户号或商户名称；生效后阻止该商户创建订单。",_=>"新增、编辑和处理记录；保存到本地数据库。"}}</p></div><button class="button primary" hidden=move||!access.can(&format!("{kind}.create")) disabled=readonly on:click=move |_|{let mut v=json!({});for field in fields(kind){v[field.key]=match field.kind{"number"=>json!(if field.key=="maxAmount"{2000.0}else if field.key=="minAmount"||field.key=="feeRate"{1.0}else{0.0}),"select" if field.key=="enabled"=>json!(true),"select"=>json!(field.options.split('|').next().unwrap_or_default()),_=>json!("")}}original.set(String::new());error.set(String::new());editor.set(Some(v));}>"＋ 新增"</button></div>
     <Show when=move||!notice.get().is_empty()><div class="success-note" role="status">{move||notice.get()}</div></Show><Show when=move||!error.get().is_empty()&&editor.get().is_none()><div class="form-error" role="alert">{move||error.get()}</div></Show>
-    <section class="panel filter-panel"><div class="filters"><label class="search-field"><span>"关键词"</span><input placeholder="名称、标识或状态" prop:value=move||query.get() on:input=move|ev|query.set(event_target_value(&ev))/></label><button class="button secondary" on:click=move |_|query.set(String::new())>"重置"</button><button class="button secondary" on:click=move |_|load(kind,rows,error)>"刷新"</button></div></section>
-    <section class="panel table-panel"><div class="table-toolbar"><strong>{title(kind)}</strong><small>{move||format!("共 {} 条",rows.get().len())}</small></div><div class="table-scroll"><table><thead><tr>{header.into_iter().map(|f|view!{<th>{f.label}</th>}).collect_view()}<th>"操作"</th></tr></thead><tbody><For each={move||{let q=query.get().to_lowercase();rows.get().into_iter().filter(|r|q.is_empty()||r.to_string().to_lowercase().contains(&q)).collect::<Vec<_>>()}} key=move |v|v.to_string() children=move |row:Value|{let cells=columns.clone();let edit=row.clone();view!{<tr>{cells.into_iter().map(|f|view!{<td>{display(&row,f.key)}</td>}).collect_view()}<td><button class="text-button" hidden=move||!access.can(&format!("{kind}.edit")) disabled=readonly on:click=move |_|{original.set(text(&edit,if kind=="products"{"code"}else{"id"}));error.set(String::new());editor.set(Some(edit.clone()));}>"编辑"</button>{if kind=="channels" {let channel_id=text(&row,"id");view!{<button class="text-button" hidden=move||!access.can("channels.toggle") disabled=move||busy.get() on:click=move |_|{if busy.get(){return}busy.set(true);let path=format!("/api/channels/{channel_id}/toggle");spawn_local(async move{match api("POST",&path,None).await{Ok(_)=>load(kind,rows,error),Err(e)=>error.set(e)}busy.set(false);});}>"切换状态"</button>}.into_any()}else{view!{<span></span>}.into_any()}}</td></tr>}}/></tbody></table><Show when=move||rows.get().is_empty()><div class="empty-state">"暂无记录，点击新增开始使用。"</div></Show></div></section>
-    <Show when=move||editor.get().is_some()><div class="modal-backdrop"><form class="modal" on:submit=move|ev|{ev.prevent_default();if busy.get(){return}busy.set(true);error.set(String::new());let data=editor.get().unwrap_or(json!({}));let existing=original.get();let path=if existing.is_empty(){endpoint(kind)}else{format!("{}/{}",endpoint(kind),existing)};spawn_local(async move{match api(if existing.is_empty(){"POST"}else{"PATCH"},&path,Some(data)).await{Ok(_)=>{editor.set(None);notice.set("已保存到本地数据库".into());load(kind,rows,error)},Err(e)=>error.set(e)}busy.set(false);});}>
-    <div class="modal-head"><h2>{title(kind)}</h2><button type="button" class="close" disabled=move||busy.get() on:click=move |_|editor.set(None)>"×"</button></div><div class="editor-fields">{form_fields.clone().into_iter().map(|field|{let key=field.key;let opt=field.options;view!{<label>{field.label}{if field.kind=="select"{view!{<select disabled=move||kind=="channels"&&key=="enabled"&&!original.get().is_empty()&&!access.can("channels.toggle") prop:value=move||editor.get().map(|v|text(&v,key)).unwrap_or_default() on:change=move|ev|{let v=event_target_value(&ev);editor.update(|current|if let Some(x)=current{x[key]=if key=="enabled"{json!(v=="true")}else{json!(v)}});}>{opt.split('|').map(|v|view!{<option value=v>{match v{"true"=>"已开启","false"=>"已关闭","admin"=>"管理员","operator"=>"操作员","viewer"=>"只读","demo"=>"本地模拟","wechat_jsapi"=>"微信 JSAPI",_=>v}}</option>}).collect_view()}</select>}.into_any()}else{view!{<input type=field.kind step="0.01" required=field.key=="name"||field.key=="code"||field.kind=="password" disabled=move||key=="code"&&!original.get().is_empty() prop:value=move||editor.get().map(|v|text(&v,key)).unwrap_or_default() on:input=move|ev|{let val=event_target_value(&ev);editor.update(|current|if let Some(x)=current{x[key]=if field.kind=="number"{json!(val.parse::<f64>().unwrap_or(0.0))}else{json!(val)}});}/>} .into_any()}}</label>}}).collect_view()}</div><Show when=move||!error.get().is_empty()><p class="form-error" role="alert">{move||error.get()}</p></Show><div class="form-actions"><button type="button" class="button secondary" disabled=move||busy.get() on:click=move |_|editor.set(None)>"取消"</button><button class="button primary" disabled=move||busy.get()>{move||if busy.get(){"保存中…"}else{"保存"}}</button></div></form></div></Show>}
+    <Show when=move||access.can(&format!("{kind}.filter_keyword"))><section class="panel filter-panel"><div class="filters"><label class="search-field"><span>"关键词"</span><input placeholder="名称、标识或状态" prop:value=move||query.get() on:input=move|ev|query.set(event_target_value(&ev))/></label><button class="button secondary" on:click=move |_|query.set(String::new())>"重置"</button><button class="button secondary" on:click=move |_|load(kind,rows,error,if access.can(&format!("{kind}.filter_keyword")){query.get()}else{String::new()})>"刷新"</button></div></section></Show>
+    <section class="panel table-panel"><div class="table-toolbar"><strong>{title(kind)}</strong><small>{move||format!("共 {} 条",rows.get().len())}</small></div><div class="table-scroll"><table><thead><tr>{header.into_iter().map(|f|view!{<th>{f.label}</th>}).collect_view()}<th>"操作"</th></tr></thead><tbody><For each=move||rows.get() key=move |v|v.to_string() children=move |row:Value|{let cells=columns.clone();let edit=row.clone();view!{<tr>{cells.into_iter().map(|f|view!{<td>{display(&row,f.key)}</td>}).collect_view()}<td><button class="text-button" hidden=move||!access.can(&format!("{kind}.edit")) disabled=readonly on:click=move |_|{original.set(text(&edit,if kind=="products"{"code"}else{"id"}));error.set(String::new());editor.set(Some(edit.clone()));}>"编辑"</button>{if kind=="channels" {let channel_id=text(&row,"id");view!{<button class="text-button" hidden=move||!access.can("channels.toggle") disabled=move||busy.get() on:click=move |_|{if busy.get(){return}busy.set(true);let path=format!("/api/channels/{channel_id}/toggle");spawn_local(async move{match api("POST",&path,None).await{Ok(_)=>load(kind,rows,error,if access.can(&format!("{kind}.filter_keyword")){query.get()}else{String::new()}),Err(e)=>error.set(e)}busy.set(false);});}>"切换状态"</button>}.into_any()}else{view!{<span></span>}.into_any()}}</td></tr>}}/></tbody></table><Show when=move||rows.get().is_empty()><div class="empty-state">"暂无记录，点击新增开始使用。"</div></Show></div></section>
+    <Show when=move||editor.get().is_some()><div class="modal-backdrop"><form class="modal" on:submit=move|ev|{ev.prevent_default();if busy.get(){return}busy.set(true);error.set(String::new());let data=editor.get().unwrap_or(json!({}));let existing=original.get();let path=if existing.is_empty(){endpoint(kind)}else{format!("{}/{}",endpoint(kind),existing)};spawn_local(async move{match api(if existing.is_empty(){"POST"}else{"PATCH"},&path,Some(data)).await{Ok(_)=>{editor.set(None);notice.set("已保存到本地数据库".into());load(kind,rows,error,if access.can(&format!("{kind}.filter_keyword")){query.get()}else{String::new()})},Err(e)=>error.set(e)}busy.set(false);});}>
+    <div class="modal-head"><h2>{title(kind)}</h2><button type="button" class="close" disabled=move||busy.get() on:click=move |_|editor.set(None)>"×"</button></div><div class="editor-fields">{form_fields.clone().into_iter().map(|field|{let key=field.key;let opt=field.options;view!{<label>{field.label}{if field.kind=="select"{view!{<select disabled=move||kind=="channels"&&key=="enabled"&&!original.get().is_empty()&&!access.can("channels.toggle") prop:value=move||editor.get().map(|v|text(&v,key)).unwrap_or_default() on:change=move|ev|{let v=event_target_value(&ev);editor.update(|current|if let Some(x)=current{x[key]=if key=="enabled"{json!(v=="true")}else{json!(v)}});}>{opt.split('|').map(|v|view!{<option value=v>{match v{"true"=>"已开启","false"=>"已关闭","admin"=>"管理员","operator"=>"操作员","viewer"=>"只读","demo"=>"本地模拟","wechat_jsapi"=>"微信 JSAPI",_=>v}}</option>}).collect_view()}</select>}.into_any()}else{view!{<input type=field.kind step="0.01" required=field.key=="name"||field.key=="code"||field.kind=="password" disabled=move||(key=="code"||key=="merchantId")&&!original.get().is_empty() prop:value=move||editor.get().map(|v|text(&v,key)).unwrap_or_default() on:input=move|ev|{let val=event_target_value(&ev);editor.update(|current|if let Some(x)=current{x[key]=if field.kind=="number"{json!(val.parse::<f64>().unwrap_or(0.0))}else{json!(val)}});}/>} .into_any()}}</label>}}).collect_view()}</div><Show when=move||!error.get().is_empty()><p class="form-error" role="alert">{move||error.get()}</p></Show><div class="form-actions"><button type="button" class="button secondary" disabled=move||busy.get() on:click=move |_|editor.set(None)>"取消"</button><button class="button primary" disabled=move||busy.get()>{move||if busy.get(){"保存中…"}else{"保存"}}</button></div></form></div></Show>}
 }
 #[component]
 pub fn OrderCreator(readonly: bool, on_created: Callback<()>) -> impl IntoView {
@@ -309,10 +330,10 @@ pub fn ReportsPage(
     let query = RwSignal::new(String::new());
     let url = move || {
         format!(
-            "/api/finance/{endpoint}?from={}&to={}&q={}",
-            from.get(),
-            to.get(),
-            crate::url_encode(&query.get())
+            "/api/finance/{endpoint}?reportPage={page_permission}{}{}{}",
+            access.query_param(page_permission, "filter_from", "from", &from.get()),
+            access.query_param(page_permission, "filter_to", "to", &to.get()),
+            access.query_param(page_permission, "filter_merchant", "q", &query.get())
         )
     };
     let refresh = move || {
@@ -325,7 +346,7 @@ pub fn ReportsPage(
         });
     };
     Effect::new(move |_| refresh());
-    view! {<div class="page-heading"><div><h1>{title}</h1><p>"根据数据库订单和不可变余额流水汇总。"</p></div><a class="button secondary export-link" hidden=move||!access.can(&format!("{page_permission}.export")) href=move||format!("{}&export=csv",url())>"导出 CSV"</a></div><section class="panel filter-panel"><div class="filters"><label>"开始日期"<input type="date" prop:value=move||from.get() on:input=move|ev|from.set(event_target_value(&ev))/></label><label>"结束日期"<input type="date" prop:value=move||to.get() on:input=move|ev|to.set(event_target_value(&ev))/></label><label>"商户名称"<input prop:value=move||query.get() on:input=move|ev|query.set(event_target_value(&ev))/></label><button class="button primary" on:click=move |_|refresh()>"查询"</button><button class="button secondary" on:click=move |_|{from.set(String::new());to.set(String::new());query.set(String::new());}>"重置"</button></div></section><p class="form-error">{move||error.get()}</p><section class="panel table-panel"><div class="table-scroll"><table><thead><tr><th>"名称"</th><th>"订单笔数"</th><th>"交易 / 变更金额"</th><th>"手续费"</th><th>"预付余额"</th><th>"变更前"</th><th>"变更后"</th><th>"时间"</th><th>"类型 / 关联单号"</th></tr></thead><tbody><For each=move||rows.get() key=|r|format!("{:?}",r) let:row><tr><td>{row.name}</td><td>{row.orders}</td><td>{format!("¥ {:.2}",row.amount)}</td><td>{format!("¥ {:.2}",row.fee)}</td><td>{format!("¥ {:.2}",row.remaining)}</td><td>{format!("¥ {:.2}",row.before)}</td><td>{format!("¥ {:.2}",row.after)}</td><td>{row.date}</td><td>{row.kind}<small>{row.related_id}</small></td></tr></For></tbody></table><Show when=move||rows.get().is_empty()><div class="empty-state">"所选条件下暂无数据。"</div></Show></div></section>}
+    view! {<div class="page-heading"><div><h1>{title}</h1><p>"根据数据库订单和不可变余额流水汇总。"</p></div><a class="button secondary export-link" hidden=move||!access.can(&format!("{page_permission}.export")) href=move||format!("{}&export=csv",url())>"导出 CSV"</a></div><Show when=move||["filter_from","filter_to","filter_merchant"].iter().any(|key|access.can(&format!("{page_permission}.{key}")))><section class="panel filter-panel"><div class="filters"><crate::access::QueryField page=page_permission permission="filter_from" label="开始日期" value=from kind="date" /><crate::access::QueryField page=page_permission permission="filter_to" label="结束日期" value=to kind="date" /><crate::access::QueryField page=page_permission permission="filter_merchant" label="商户名称" value=query /><button class="button primary" on:click=move |_|refresh()>"查询"</button><button class="button secondary" on:click=move |_|{from.set(String::new());to.set(String::new());query.set(String::new());}>"重置"</button></div></section></Show><p class="form-error">{move||error.get()}</p><section class="panel table-panel"><div class="table-scroll"><table><thead><tr><th>"名称"</th><th>"订单笔数"</th><th>"交易 / 变更金额"</th><th>"手续费"</th><th>"预付余额"</th><th>"变更前"</th><th>"变更后"</th><th>"时间"</th><th>"类型 / 关联单号"</th></tr></thead><tbody><For each=move||rows.get() key=|r|format!("{:?}",r) let:row><tr><td>{row.name}</td><td>{row.orders}</td><td>{format!("¥ {:.2}",row.amount)}</td><td>{format!("¥ {:.2}",row.fee)}</td><td>{format!("¥ {:.2}",row.remaining)}</td><td>{format!("¥ {:.2}",row.before)}</td><td>{format!("¥ {:.2}",row.after)}</td><td>{row.date}</td><td>{row.kind}<small>{row.related_id}</small></td></tr></For></tbody></table><Show when=move||rows.get().is_empty()><div class="empty-state">"所选条件下暂无数据。"</div></Show></div></section>}
 }
 #[component]
 pub fn SettingsEditor(readonly: bool, on_saved: Callback<Value>) -> impl IntoView {

@@ -39,7 +39,7 @@ func (s *Store) expireOrders() error {
 			if _, e = tx.Exec("UPDATE orders SET status='已关闭' WHERE id=? AND status IN ('未支付','处理中')", oid); e != nil {
 				return e
 			}
-			if _, e = tx.Exec("INSERT INTO audit(actor,action,target,detail,ip,created_at) VALUES(?,?,?,?,?,?)", "系统", "订单超时关闭", oid, "未支付超时", "local", timestamp()); e != nil {
+			if e = auditEvent(tx, User{Name: "系统"}, "订单超时关闭", oid, "未支付超时", "local"); e != nil {
 				return e
 			}
 		}

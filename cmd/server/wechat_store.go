@@ -94,8 +94,7 @@ func (s *Store) reserveWechat(tx *sql.Tx, oid, mid string, fee int64, descriptio
 	return s.ensureWechatCheckoutTx(tx, oid, gw)
 }
 func wechatAudit(tx *sql.Tx, actor, action, oid, detail string) error {
-	_, err := tx.Exec("INSERT INTO audit(actor,action,target,detail,ip,created_at) VALUES(?,?,?,?,?,?)", actor, action, oid, detail, "wechat", timestamp())
-	return err
+	return auditEvent(tx, User{Name: actor}, action, oid, detail, "wechat")
 }
 func (s *Store) applyWechatTransaction(t *wxpayments.Transaction, eventID, bodyHash, actor string) error {
 	if t == nil || ptr(t.OutTradeNo) == "" || ptr(t.Appid) == "" || ptr(t.Mchid) == "" || ptr(t.TradeState) == "" {

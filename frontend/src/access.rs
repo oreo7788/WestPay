@@ -28,6 +28,16 @@ impl Access {
             self.can(&format!("{page}.view"))
         }
     }
+    pub fn query_param(self, page: &str, key: &str, param: &str, value: &str) -> String {
+        if self.can(&format!("{page}.view"))
+            && self.can(&format!("{page}.{key}"))
+            && !value.trim().is_empty()
+        {
+            format!("&{param}={}", crate::url_encode(value.trim()))
+        } else {
+            String::new()
+        }
+    }
     pub fn internal(self) -> bool {
         self.0.with(|u| u.identity == "internal")
     }
@@ -113,6 +123,10 @@ struct Role {
     identity: String,
     enabled: bool,
     permissions: Vec<String>,
+    #[serde(rename = "dataScope")]
+    data_scope: String,
+    #[serde(rename = "merchantIds")]
+    merchant_ids: Vec<String>,
 }
 fn label(identity: &str) -> &'static str {
     if identity == "merchant" {
@@ -217,16 +231,28 @@ pub fn RolesPage() -> impl IntoView {
     let editor = RwSignal::new(None::<Value>);
     let target = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
+    let merchants = RwSignal::new(Vec::<Merchant>::new());
+    spawn_local(async move {
+        match api("GET", "/api/merchants", None).await {
+            Ok(v) => merchants.set(serde_json::from_value(v).unwrap_or_default()),
+            Err(e) => error.set(e),
+        }
+    });
+
     load_roles(rows, catalog, error);
     view! {
-    <div class="page-heading"><div><h1>"角色与权限"</h1><p>"按页面勾选查看权限，再分别授权页面操作；多个角色的权限合并生效。"</p></div><button class="button primary" on:click=move |_|{target.set(String::new());error.set(String::new());editor.set(Some(json!({"name":"","identity":"internal","enabled":true,"permissions":[]})));}>"＋ 创建角色"</button></div>
+    <div class="page-heading"><div><h1>"角色与权限"</h1><p>"按页面勾选查看权限，再分别授权页面操作；多个角色的权限合并生效。"</p></div><button class="button primary" on:click=move |_|{target.set(String::new());error.set(String::new());editor.set(Some(json!({"name":"","identity":"internal","enabled":true,"permissions":[],"dataScope":"all","merchantIds":[]})));}>"＋ 创建角色"</button></div>
     <p class="form-error" role="alert">{move||error.get()}</p><p class="success-note">{move||notice.get()}</p>
-    <section class="panel table-panel"><div class="table-scroll"><table><thead><tr><th>"角色"</th><th>"适用身份"</th><th>"已授权权限数"</th><th>"状态"</th><th>"操作"</th></tr></thead><tbody><For each=move||rows.get() key=|r|format!("{r:?}") let:r>{let edit=r.clone();view!{<tr><td><strong>{r.name}</strong><small>{r.id}</small></td><td>{label(&r.identity)}</td><td>{r.permissions.len()}</td><td>{if r.enabled{"启用"}else{"停用"}}</td><td><button class="text-button" on:click=move |_|{target.set(edit.id.clone());error.set(String::new());editor.set(Some(json!({"name":edit.name,"identity":edit.identity,"enabled":edit.enabled,"permissions":edit.permissions})));}>"配置菜单及操作权限"</button></td></tr>}}</For></tbody></table></div></section>
+    <section class="panel table-panel"><div class="table-scroll"><table><thead><tr><th>"角色"</th><th>"适用身份"</th><th>"已授权权限数"</th><th>"数据查看范围"</th><th>"状态"</th><th>"操作"</th></tr></thead><tbody><For each=move||rows.get() key=|r|format!("{r:?}") let:r>{let edit=r.clone();view!{<tr><td><strong>{r.name}</strong><small>{r.id}</small></td><td>{label(&r.identity)}</td><td>{r.permissions.len()}</td><td>{match r.data_scope.as_str(){"all"=>"全部数据","selected_merchants"=>"指定商户",_=>if r.identity=="merchant"{"当前账号所属商户"}else{"未配置"}}}<small>{if r.data_scope=="selected_merchants"{format!("{} 个商户",r.merchant_ids.len())}else{String::new()}}</small></td><td>{if r.enabled{"启用"}else{"停用"}}</td><td><button class="text-button" on:click=move |_|{target.set(edit.id.clone());error.set(String::new());editor.set(Some(json!({"name":edit.name,"identity":edit.identity,"enabled":edit.enabled,"permissions":edit.permissions,"dataScope":edit.data_scope,"merchantIds":edit.merchant_ids})));}>"配置菜单及操作权限"</button></td></tr>}}</For></tbody></table></div></section>
     <Show when=move||editor.get().is_some()><div class="modal-backdrop"><form class="modal access-modal" on:submit=move|ev|{ev.prevent_default();if busy.get(){return}busy.set(true);error.set(String::new());let data=editor.get().unwrap_or_default();let rid=target.get();let creating=rid.is_empty();let path=if creating{"/api/access/roles".into()}else{format!("/api/access/roles/{rid}")};spawn_local(async move{match api(if creating{"POST"}else{"PATCH"},&path,Some(data)).await{Ok(_)=>{editor.set(None);notice.set("角色权限已保存，后续请求按新权限执行".into());load_roles(rows,catalog,error)},Err(e)=>error.set(e)}busy.set(false);});}>
     <div class="modal-head"><h2>"配置角色"</h2><button type="button" class="close" disabled=move||busy.get() on:click=move |_|editor.set(None)>"×"</button></div>
     <div class="editor-fields"><label>"角色名称"<input required maxlength="100" prop:value=move||editor.get().map(|v|strval(&v,"name")).unwrap_or_default() on:input=move|ev|editor.update(|v|if let Some(v)=v{v["name"]=json!(event_target_value(&ev))})/></label>
-    <label>"适用身份"<select disabled=move||!target.get().is_empty() prop:value=move||editor.get().map(|v|strval(&v,"identity")).unwrap_or_default() on:change=move|ev|editor.update(|v|if let Some(v)=v{v["identity"]=json!(event_target_value(&ev));v["permissions"]=json!([]);})><option value="internal">"内部"</option><option value="merchant">"商户"</option></select></label>
+    <label>"适用身份"<select disabled=move||!target.get().is_empty() prop:value=move||editor.get().map(|v|strval(&v,"identity")).unwrap_or_default() on:change=move|ev|editor.update(|v|if let Some(v)=v{v["identity"]=json!(event_target_value(&ev));v["permissions"]=json!([]);v["dataScope"]=json!(if v["identity"]=="merchant"{"own_merchant"}else{"all"});v["merchantIds"]=json!([]);})><option value="internal">"内部"</option><option value="merchant">"商户"</option></select></label>
     <label>"角色状态"<select prop:value=move||if editor.get().is_some_and(|v|v["enabled"]==true){"true"}else{"false"} on:change=move|ev|editor.update(|v|if let Some(v)=v{v["enabled"]=json!(event_target_value(&ev)=="true")})><option value="true">"启用"</option><option value="false">"停用"</option></select></label></div>
+    <fieldset class="permission-box"><legend>"数据查看范围"</legend><div class="editor-fields"><label>"范围"<select prop:value=move||editor.get().map(|v|strval(&v,"dataScope")).unwrap_or_default() on:change=move|ev|editor.update(|v|if let Some(v)=v{v["dataScope"]=json!(event_target_value(&ev));v["merchantIds"]=json!([]);})>
+    {move||if editor.get().is_some_and(|v|v["identity"]=="merchant"){view!{<option value="own_merchant">"当前账号所属商户"</option>}.into_any()}else{view!{<option value="own_merchant" disabled>"请选择范围"</option><option value="all">"全部数据"</option><option value="selected_merchants">"指定商户"</option>}.into_any()}}</select></label></div>
+    <Show when=move||editor.get().is_some_and(|v|v["dataScope"]=="selected_merchants")><div class="permission-actions scope-merchants"><For each=move||merchants.get() key=|m|m.id.clone() let:m>{let id=m.id.clone();let checked=id.clone();view!{<label class="permission-choice"><input type="checkbox" prop:checked=move||editor.get().is_some_and(|v|selected(&v,"merchantIds",&checked)) on:change=move|ev|editor.update(|v|if let Some(v)=v{toggle(v,"merchantIds",&id,event_target_checked(&ev))})/>{format!("{} · {}",m.name,m.id)}</label>}}</For></div><Show when=move||merchants.get().is_empty()><p>"暂无商户，请先在商户列表创建商户。"</p></Show></Show>
+    <p class="subtle">"范围按数据归属商户判断，与创建人无关。同一页面的多个角色范围取并集；列表、详情、统计及导出统一生效。商户账号始终限于其归属商户。"</p><p class="subtle">"没有商户归属的全局配置仅在“全部数据”范围可见。"</p></fieldset>
     <p class="demo-note">"用户及角色管理仅限超管。商户角色仅列出商户可用功能，数据始终限定为所属商户。"</p>
     <div class="permission-toolbar"><button type="button" class="text-button" on:click=move |_|{let merchant=editor.get().is_some_and(|v|v["identity"]=="merchant");let grants=catalog.get().into_iter().filter(|p|!merchant||p.merchant).map(|p|p.code).collect::<Vec<_>>();editor.update(|v|if let Some(v)=v{v["permissions"]=json!(grants)})}>"全选当前身份权限"</button><button type="button" class="text-button" on:click=move |_|editor.update(|v|if let Some(v)=v{v["permissions"]=json!([])})>"清空权限"</button></div>
     <div class="permission-tree"><For each=move||{let merchant=editor.get().is_some_and(|v|v["identity"]=="merchant");catalog.get().into_iter().filter(|p|p.code.ends_with(".view")&&(!merchant||p.merchant)).collect::<Vec<_>>()} key=|p|p.code.clone() let:page_permission>{let page=page_permission.page.clone();let view_code=page_permission.code.clone();let checked=view_code.clone();view!{
@@ -244,4 +270,16 @@ pub fn OwnPassword() -> impl IntoView {
     let error = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     view! {<button class="text-button" on:click=move |_|{old.set(String::new());password.set(String::new());error.set(String::new());open.set(true)}>"修改密码"</button><Show when=move||open.get()><div class="modal-backdrop"><form class="modal small-modal" on:submit=move|ev|{ev.prevent_default();if busy.get(){return}busy.set(true);let body=json!({"currentPassword":old.get(),"password":password.get()});spawn_local(async move{match api("POST","/api/auth/password",Some(body)).await{Ok(_)=>{if let Some(w)=web_sys::window(){let _=w.location().reload();}},Err(e)=>error.set(e)}busy.set(false);});}><div class="modal-head"><h2>"修改密码"</h2><button class="close" type="button" disabled=move||busy.get() on:click=move |_|open.set(false)>"×"</button></div><label>"原密码"<input required type="password" autocomplete="current-password" prop:value=move||old.get() on:input=move|ev|old.set(event_target_value(&ev))/></label><label>"新密码"<input required type="password" minlength="10" maxlength="72" autocomplete="new-password" prop:value=move||password.get() on:input=move|ev|password.set(event_target_value(&ev))/></label><p>"保存后请使用新密码重新登录。"</p><p class="form-error">{move||error.get()}</p><div class="form-actions"><button class="button primary" disabled=move||busy.get()>"确认修改"</button></div></form></div></Show>}
+}
+
+#[component]
+pub fn QueryField(
+    page: &'static str,
+    permission: &'static str,
+    label: &'static str,
+    value: RwSignal<String>,
+    #[prop(default = "text")] kind: &'static str,
+) -> impl IntoView {
+    let access = access();
+    view! {<Show when=move||access.can(&format!("{page}.{permission}"))><label><span>{label}</span><input type=kind prop:value=move||value.get() on:input=move|ev|value.set(event_target_value(&ev))/></label></Show>}
 }

@@ -6,12 +6,28 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
 
 func request(t *testing.T, s *Store, cookie *http.Cookie, method, path string, body any, want int) map[string]any {
 	t.Helper()
+	if strings.HasPrefix(path, "/api/access/roles") && (method == "POST" || method == "PATCH") {
+		if data, ok := body.(map[string]any); ok {
+			if _, present := data["dataScope"]; !present {
+				copy := map[string]any{}
+				for k, v := range data {
+					copy[k] = v
+				}
+				copy["dataScope"] = "all"
+				if data["identity"] == "merchant" {
+					copy["dataScope"] = "own_merchant"
+				}
+				body = copy
+			}
+		}
+	}
 	b, _ := json.Marshal(body)
 	r := httptest.NewRequest(method, path, bytes.NewReader(b))
 	if cookie != nil {
@@ -105,7 +121,7 @@ func TestConcurrentSettlementDebitsOnce(t *testing.T) {
 }
 func TestPermissionsAndOrigin(t *testing.T) {
 	s, c, _ := fixture(t)
-	request(t, s, c, "POST", "/api/users", map[string]any{"name": "viewer", "password": "test-only-password-456", "role": "viewer"}, 201)
+	request(t, s, c, "POST", "/api/users", map[string]any{"name": "viewer", "password": "test-only-password-456", "identity": "internal", "enabled": true, "roleIds": []string{}}, 200)
 	r := httptest.NewRequest("POST", "/api/auth/login", bytes.NewBufferString(`{"name":"viewer","password":"test-only-password-456"}`))
 	w := httptest.NewRecorder()
 	s.handler().ServeHTTP(w, r)

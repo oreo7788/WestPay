@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct Dashboard {
     today_orders: i32,
     today_success: i32,
@@ -20,6 +20,29 @@ struct Dashboard {
     yesterday_orders: i32,
     yesterday_amount: f64,
     trend: Vec<f64>,
+    channel_count: i32,
+    merchant_count: i32,
+    channels: Vec<HomeChannel>,
+    merchant_ranking: Vec<MerchantRank>,
+    latest_orders: Vec<PaymentOrder>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HomeChannel {
+    id: String,
+    name: String,
+    method: String,
+    enabled: bool,
+    today_amount: f64,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MerchantRank {
+    id: String,
+    name: String,
+    today_count: i32,
+    today_rate: f64,
+    today_amount: f64,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -76,10 +99,8 @@ struct Product {
 struct Channel {
     id: String,
     name: String,
-    fee_rate: f64,
     plugin: String,
     method: String,
-    today_amount: f64,
     enabled: bool,
 }
 #[derive(Clone, Debug, Deserialize)]
@@ -114,12 +135,8 @@ fn Console(user: features::User, on_logout: Callback<()>) -> impl IntoView {
     let (payments, set_payments) = signal(Vec::<PaymentOrder>::new());
     let (merchants, set_merchants) = signal(Vec::<Merchant>::new());
     let (_products, set_products) = signal(Vec::<Product>::new());
-    let (channels, set_channels) = signal(Vec::<Channel>::new());
     let (detail, set_detail) = signal(None::<PaymentOrder>);
     let (notice, set_notice) = signal(String::new());
-    let (q, set_q) = signal(String::new());
-    let (status, set_status) = signal("全部状态".to_string());
-    let (method, set_method) = signal("所有支付方式".to_string());
     let (prepay_merchant, set_prepay_merchant) = signal(None::<Merchant>);
     let (prepay_amount, set_prepay_amount) = signal(String::new());
     let (new_merchant, set_new_merchant) = signal(false);
@@ -148,27 +165,11 @@ fn Console(user: features::User, on_logout: Callback<()>) -> impl IntoView {
         } else {
             set_dashboard.set(None);
         }
-        if current_page == "home" && access.can("orders.view") {
-            fetch_payments(
-                set_payments,
-                "".into(),
-                "全部状态".into(),
-                "所有支付方式".into(),
-                false,
-            );
-        }
-        if access.any(&["home.view", "merchants.view", "orders.create"]) {
-            fetch_merchants(set_merchants);
-        } else {
+        if !access.any(&["merchants.view", "orders.create"]) {
             set_merchants.set(Vec::new());
         }
         if access.any(&["products.view", "orders.create"]) {
             fetch_products(set_products);
-        }
-        if access.any(&["channels.view", "orders.create"]) {
-            fetch_channels(set_channels);
-        } else {
-            set_channels.set(Vec::new());
         }
     });
 
@@ -221,7 +222,7 @@ fn Console(user: features::User, on_logout: Callback<()>) -> impl IntoView {
                    <header class="topbar"><div class="crumb"><span>"支付管理"</span><b>"/"</b><strong>{move || page_title(&page.get())}</strong></div><div class="top-actions"><span class="system-pill"><i></i>"系统运行正常"</span><span class="top-avatar">"A"</span><span>{move||access.0.get().name}</span><access::OwnPassword/><button class="text-button" on:click=move |_|on_logout.run(())>"退出"</button></div></header>
                    <div class="content-area">
                        {move || if !access.page(&page.get()){view!{<section class="panel empty-state"><h2>"暂无页面访问权限"</h2><p>"请联系超级管理员分配角色，或从左侧选择已授权菜单。"</p></section>}.into_any()}else{match page.get().as_str() {
-                           "orders" | "history" => view! { <PaymentPage archive=page.get() == "history" payments=payments set_payments=set_payments q=q set_q=set_q status=status set_status=set_status method=method set_method=set_method set_detail=set_detail set_notice=set_notice readonly=readonly /> }.into_any(),
+                           "orders" | "history" => view! { <PaymentPage archive=page.get() == "history" payments=payments set_payments=set_payments set_detail=set_detail set_notice=set_notice readonly=readonly /> }.into_any(),
                            "merchants" => view! { <MerchantPage merchants=merchants set_merchants=set_merchants set_prepay_merchant=set_prepay_merchant set_prepay_amount=set_prepay_amount set_new_merchant=set_new_merchant set_notice=set_notice prepay_key=prepay_key readonly=readonly /> }.into_any(),
                            "products" => view! { <ManagedPage kind="products" readonly=readonly /> }.into_any(),
                            "merchant_settlement" => view! { <ReportsPage title="商户对账" endpoint="merchants" page_permission="merchant_settlement" /> }.into_any(),
@@ -231,7 +232,7 @@ fn Console(user: features::User, on_logout: Callback<()>) -> impl IntoView {
                            "finance_merchants" => view! { <ReportsPage title="商户数据" endpoint="merchants" page_permission="finance_merchants" /> }.into_any(),
                            "prepay" => view! { <ReportsPage title="预付明细" endpoint="prepay" page_permission="prepay" /> }.into_any(),
                            "statistics" => view! { <ReportsPage title="订单统计" endpoint="statistics" page_permission="statistics" /> }.into_any(),
-                           "home" => view! { <Home dashboard=dashboard orders=payments channels=channels merchants=merchants set_page=set_page set_detail=set_detail /> }.into_any(),
+                           "home" => view! { <Home dashboard=dashboard set_page=set_page set_detail=set_detail /> }.into_any(),
                            "robot" => view! { <RobotPage /> }.into_any(),
                            "methods" => view! { <PaymentMethods /> }.into_any(),
                            "plugins" => view! { <AvailablePlugins /> }.into_any(),
@@ -253,7 +254,7 @@ fn Console(user: features::User, on_logout: Callback<()>) -> impl IntoView {
                    <div class="modal-backdrop" on:click=move |_| set_detail.set(None)>
                        <div class="modal" on:click=|ev| ev.stop_propagation()>
                            <div class="modal-head"><div><h2>"收款订单详情"</h2><p>"订单信息与通道状态"</p></div><button class="close" on:click=move |_| set_detail.set(None)>"×"</button></div>
-                           {move || detail.get().map(|o| view! { <OrderDetails readonly=readonly order=o on_update=Callback::new(move |updated:PaymentOrder|{set_detail.set(Some(updated.clone()));set_payments.update(|list|{if let Some(row)=list.iter_mut().find(|row|row.system_id==updated.system_id){*row=updated;}});fetch_dashboard(set_dashboard);fetch_merchants(set_merchants);fetch_channels(set_channels);})/> })}
+                           {move || detail.get().map(|o| view! { <OrderDetails readonly=readonly order=o on_update=Callback::new(move |updated:PaymentOrder|{set_detail.set(Some(updated.clone()));set_payments.update(|list|{if let Some(row)=list.iter_mut().find(|row|row.system_id==updated.system_id){*row=updated;}});fetch_dashboard(set_dashboard);fetch_merchants(set_merchants);})/> })}
                        </div>
                    </div>
                </Show>
@@ -329,28 +330,52 @@ fn NavGroup(
 #[component]
 fn Home(
     dashboard: ReadSignal<Option<Dashboard>>,
-    orders: ReadSignal<Vec<PaymentOrder>>,
-    channels: ReadSignal<Vec<Channel>>,
-    merchants: ReadSignal<Vec<Merchant>>,
     set_page: WriteSignal<String>,
     set_detail: WriteSignal<Option<PaymentOrder>>,
 ) -> impl IntoView {
     let access = access::access();
+    let allowed = move |key: &str| {
+        access.can("home.view")
+            && access.can(&format!("home.{key}"))
+            && (access.internal()
+                || ![
+                    "profit",
+                    "channel_count",
+                    "merchant_count",
+                    "channels",
+                    "merchant_ranking",
+                ]
+                .contains(&key))
+    };
+    let orders =
+        Signal::derive(move || dashboard.get().map(|d| d.latest_orders).unwrap_or_default());
     view! { <div class="page-heading"><div><h1>"后台管理首页"</h1><p>"支付通道与收付款订单运营概况"</p></div><span class="date-chip">{today_label()}</span></div>
-        <div class="notice-banner"><span class="notice-icon">"!"</span><strong>"已连接本地数据库。当前支付适配器为本地模拟通道。"</strong></div>
-        <div class="metric-grid">
-            <Metric label="今日充值" value=move || dashboard.get().map(|d|d.today_orders.to_string()).unwrap_or("—".into()) hint="订单数" icon="▤" color="blue" />
-            <Metric label="成交笔数" value=move || dashboard.get().map(|d|d.today_success.to_string()).unwrap_or("—".into()) hint="成功订单" icon="✓" color="green" />
-            <Metric label="成交金额（元）" value=move || dashboard.get().map(|d|format!("¥ {:.2}",d.today_amount)).unwrap_or("—".into()) hint="今日成功金额" icon="￥" color="purple" />
-            <Metric label="成功率" value=move || dashboard.get().map(|d|format!("{:.1}%",d.success_rate)).unwrap_or("—".into()) hint="成功 / 总订单" icon="↗" color="orange" />
-            <Show when=move||access.internal()><Metric label="平台利润（元）" value=move || dashboard.get().map(|d|format!("¥ {:.2}",d.today_profit)).unwrap_or("—".into()) hint="手续费收入 − 通道成本" icon="◆" color="cyan" /></Show>
-        </div>
-        <div class="summary-strip"><div><span>"当月成交金额"</span><strong>{move || format!("¥ {:.2}",dashboard.get().map(|d|d.month_amount).unwrap_or(0.0))}</strong></div><div><span>"昨日下单笔数"</span><strong>{move || dashboard.get().map(|d|d.yesterday_orders.to_string()).unwrap_or("0".into())}</strong></div><div><span>"昨日成交金额"</span><strong>{move||format!("¥ {:.2}",dashboard.get().map(|d|d.yesterday_amount).unwrap_or(0.0))}</strong></div><div><span>"今日通道数"</span><strong>{move || channels.get().len().to_string()}</strong></div><div><span>"商户数量"</span><strong>{move || merchants.get().len().to_string()}</strong></div></div>
-        <div class="dashboard-grid"><section class="panel chart-panel"><div class="section-title"><div><h2>"近 12 时段成交趋势"</h2><p>"支付订单金额统计"</p></div><span class="subtle-pill">"今日"</span></div><div class="bar-chart">{move || { let vals=dashboard.get().map(|d|d.trend).unwrap_or_default(); vals.into_iter().enumerate().map(|(i,v)| { let maximum=dashboard.get().map(|d|d.trend.into_iter().fold(1.0_f64,f64::max)).unwrap_or(1.0);let h=(v/maximum*85.0).max(1.0); view! { <div class="bar-col"><span class="bar-value">{format!("{v:.0}")}</span><i style=format!("height:{h}%")></i><small>{format!("{:02}:00",i*2)}</small></div> } }).collect_view() }}</div></section>
-            <section class="panel channel-panel" hidden=move||!access.can("channels.view")><div class="section-title"><div><h2>"当天通道统计"</h2><p>"各支付通道收款概况"</p></div><button class="text-button" on:click=move |_| set_page.set("channels".into())>"通道管理 →"</button></div><For each=move || channels.get() key=|c|format!("{:?}",c) let:channel><div class="channel-row"><span class="channel-logo">{method_icon(&channel.method)}</span><div class="grow"><strong>{channel.name}</strong><small>{format!("通道 {} · 费率 {:.2}%",channel.id,channel.fee_rate)}</small></div><strong>{format!("¥ {:.2}",channel.today_amount)}</strong><span class:badge-on=channel.enabled class="status-badge">{if channel.enabled{"已开启"}else{"已关闭"}}</span></div></For></section></div>
-        <div class="dashboard-grid lower-grid"><section class="panel" hidden=move||!access.can("orders.view")><div class="section-title"><div><h2>"最新收款订单"</h2><p>"最近创建的交易"</p></div><button class="text-button" on:click=move |_| set_page.set("orders".into())>"查看全部 →"</button></div><OrderTable orders=orders set_detail=set_detail /></section>
-            <section class="panel ranking-panel"><div class="section-title"><div><h2>"当天商户排行"</h2><p>"按订单数量排序"</p></div></div><For each=move || merchants.get() key=|m|format!("{:?}",m) let:merchant><div class="rank-row"><span class="rank-num">{merchant.id}</span><div class="grow"><strong>{merchant.name}</strong><small>{format!("今日 {} 笔 · 成功率 {:.1}%",merchant.today_count,merchant.today_rate)}</small></div><span>{format!("¥ {:.2}",merchant.prepaid)}</span></div></For></section>
-        </div>
+        <Show when=move||allowed("notice")><div class="notice-banner"><span class="notice-icon">"!"</span><strong>"已连接本地数据库。"</strong></div></Show>
+        <Show when=move||["today_orders","today_success","today_amount","success_rate","profit"].iter().any(|p|allowed(p))>
+        <div class="metric-grid home-metrics">
+            <Show when=move||allowed("today_orders")><Metric label="今日充值" value=move || dashboard.get().map(|d|d.today_orders.to_string()).unwrap_or("—".into()) hint="订单数" icon="▤" color="blue" /></Show>
+            <Show when=move||allowed("today_success")><Metric label="成交笔数" value=move || dashboard.get().map(|d|d.today_success.to_string()).unwrap_or("—".into()) hint="成功订单" icon="✓" color="green" /></Show>
+            <Show when=move||allowed("today_amount")><Metric label="成交金额（元）" value=move || dashboard.get().map(|d|format!("¥ {:.2}",d.today_amount)).unwrap_or("—".into()) hint="今日成功金额" icon="￥" color="purple" /></Show>
+            <Show when=move||allowed("success_rate")><Metric label="成功率" value=move || dashboard.get().map(|d|format!("{:.1}%",d.success_rate)).unwrap_or("—".into()) hint="成功 / 总订单" icon="↗" color="orange" /></Show>
+            <Show when=move||allowed("profit")><Metric label="平台利润（元）" value=move || dashboard.get().map(|d|format!("¥ {:.2}",d.today_profit)).unwrap_or("—".into()) hint="手续费收入 − 通道成本" icon="◆" color="cyan" /></Show>
+        </div></Show>
+        <Show when=move||["month_amount","yesterday_orders","yesterday_amount","channel_count","merchant_count"].iter().any(|p|allowed(p))>
+        <div class="summary-strip home-summary">
+            <Show when=move||allowed("month_amount")><div><span>"当月成交金额"</span><strong>{move||dashboard.get().map(|d|format!("¥ {:.2}",d.month_amount)).unwrap_or("—".into())}</strong></div></Show>
+            <Show when=move||allowed("yesterday_orders")><div><span>"昨日下单笔数"</span><strong>{move||dashboard.get().map(|d|d.yesterday_orders.to_string()).unwrap_or("—".into())}</strong></div></Show>
+            <Show when=move||allowed("yesterday_amount")><div><span>"昨日成交金额"</span><strong>{move||dashboard.get().map(|d|format!("¥ {:.2}",d.yesterday_amount)).unwrap_or("—".into())}</strong></div></Show>
+            <Show when=move||allowed("channel_count")><div><span>"今日通道数"</span><strong>{move||dashboard.get().map(|d|d.channel_count.to_string()).unwrap_or("—".into())}</strong></div></Show>
+            <Show when=move||allowed("merchant_count")><div><span>"商户数量"</span><strong>{move||dashboard.get().map(|d|d.merchant_count.to_string()).unwrap_or("—".into())}</strong></div></Show>
+        </div></Show>
+        <Show when=move||allowed("trend")||allowed("channels")><div class="dashboard-grid home-panels">
+        <Show when=move||allowed("trend")><section class="panel chart-panel"><div class="section-title"><div><h2>"近 12 时段成交趋势"</h2><p>"支付订单金额统计"</p></div><span class="subtle-pill">"今日"</span></div><div class="bar-chart">{move || { let vals=dashboard.get().map(|d|d.trend).unwrap_or_default(); let maximum=vals.iter().copied().fold(1.0_f64,f64::max); vals.into_iter().enumerate().map(|(i,v)| { let h=(v/maximum*85.0).max(1.0); view! { <div class="bar-col"><span class="bar-value">{format!("{v:.0}")}</span><i style=format!("height:{h}%")></i><small>{format!("{:02}:00",i*2)}</small></div> } }).collect_view() }}</div></section></Show>
+        <Show when=move||allowed("channels")><section class="panel channel-panel"><div class="section-title"><div><h2>"当天通道统计"</h2><p>"各支付通道收款概况"</p></div><Show when=move||access.can("channels.view")><button class="text-button" on:click=move |_| set_page.set("channels".into())>"通道管理 →"</button></Show></div><For each=move || dashboard.get().map(|d|d.channels).unwrap_or_default() key=|c|format!("{:?}",c) let:channel><div class="channel-row"><span class="channel-logo">{method_icon(&channel.method)}</span><div class="grow"><strong>{channel.name}</strong><small>{format!("通道 {}",channel.id)}</small></div><strong>{format!("¥ {:.2}",channel.today_amount)}</strong><span class:badge-on=channel.enabled class="status-badge">{if channel.enabled{"已开启"}else{"已关闭"}}</span></div></For></section></Show>
+        </div></Show>
+        <Show when=move||allowed("latest_orders")||allowed("merchant_ranking")><div class="dashboard-grid home-panels">
+        <Show when=move||allowed("latest_orders")><section class="panel"><div class="section-title"><div><h2>"最新收款订单"</h2><p>"最近创建的交易"</p></div><Show when=move||access.can("orders.view")><button class="text-button" on:click=move |_| set_page.set("orders".into())>"查看全部 →"</button></Show></div><OrderTable orders=orders set_detail=set_detail /></section></Show>
+        <Show when=move||allowed("merchant_ranking")><section class="panel ranking-panel"><div class="section-title"><div><h2>"当天商户排行"</h2><p>"按订单数量排序"</p></div></div><For each={move || dashboard.get().map(|d|d.merchant_ranking).unwrap_or_default().into_iter().enumerate().collect::<Vec<_>>()} key=|(i,m)|format!("{i}{}{m:?}",m.id) let:item>{let (index,merchant)=item;view!{<div class="rank-row"><span class="rank-num">{index+1}</span><div class="grow"><strong>{merchant.name}</strong><small>{format!("今日 {} 笔 · 成功率 {:.1}%",merchant.today_count,merchant.today_rate)}</small></div><span>{format!("¥ {:.2}",merchant.today_amount)}</span></div>}}</For></section></Show>
+        </div></Show>
+        <Show when=move||!["notice","today_orders","today_success","today_amount","success_rate","profit","month_amount","yesterday_orders","yesterday_amount","channel_count","merchant_count","trend","channels","latest_orders","merchant_ranking"].iter().any(|p|allowed(p))><div class="panel empty-state">"暂无已授权的首页面板，请联系管理员配置角色权限。"</div></Show>
     }
 }
 
@@ -370,18 +395,54 @@ fn PaymentPage(
     archive: bool,
     payments: ReadSignal<Vec<PaymentOrder>>,
     set_payments: WriteSignal<Vec<PaymentOrder>>,
-    q: ReadSignal<String>,
-    set_q: WriteSignal<String>,
-    status: ReadSignal<String>,
-    set_status: WriteSignal<String>,
-    method: ReadSignal<String>,
-    set_method: WriteSignal<String>,
     set_detail: WriteSignal<Option<PaymentOrder>>,
     set_notice: WriteSignal<String>,
     readonly: bool,
 ) -> impl IntoView {
     let access = access::access();
     let permission_page = if archive { "history" } else { "orders" };
+    let system_id = RwSignal::new(String::new());
+    let merchant_order = RwSignal::new(String::new());
+    let merchant_query = RwSignal::new(String::new());
+    let method = RwSignal::new(String::new());
+    let status = RwSignal::new(String::new());
+    let from = RwSignal::new(String::new());
+    let to = RwSignal::new(String::new());
+    let channel_id = RwSignal::new(String::new());
+    let query_url = move || {
+        let mut url = format!("/api/payments?archive={archive}");
+        for (key, param, value) in [
+            ("filter_system_id", "systemId", system_id.get()),
+            (
+                "filter_merchant_order",
+                "merchantOrder",
+                merchant_order.get(),
+            ),
+            ("filter_merchant", "merchant", merchant_query.get()),
+            ("filter_method", "method", method.get()),
+            ("filter_status", "status", status.get()),
+            ("filter_from", "from", from.get()),
+            ("filter_to", "to", to.get()),
+            ("filter_channel_id", "channelId", channel_id.get()),
+        ] {
+            url.push_str(&access.query_param(permission_page, key, param, &value));
+        }
+        url
+    };
+    let can_filter = move || {
+        [
+            "filter_system_id",
+            "filter_merchant_order",
+            "filter_merchant",
+            "filter_method",
+            "filter_status",
+            "filter_from",
+            "filter_to",
+            "filter_channel_id",
+        ]
+        .iter()
+        .any(|key| access.can(&format!("{permission_page}.{key}")))
+    };
     let qr_order = RwSignal::new(None::<PaymentOrder>);
     let auto_refresh = RwSignal::new(true);
     let current_page = RwSignal::new(1_i32);
@@ -393,13 +454,7 @@ fn PaymentPage(
         loading.set(true);
         let version = generation.get_untracked() + 1;
         generation.set(version);
-        let path = format!(
-            "/api/payments?archive={archive}&q={}&status={}&method={}&page={}&pageSize=20",
-            url_encode(&q.get()),
-            url_encode(&status.get()),
-            url_encode(&method.get()),
-            current_page.get()
-        );
+        let path = format!("{}&page={}&pageSize=20", query_url(), current_page.get());
         spawn_local(async move {
             match api("GET", &path, None).await {
                 Ok(v) => {
@@ -421,7 +476,7 @@ fn PaymentPage(
         });
     };
     Effect::new(move |_| {
-        let _ = (q.get(), status.get(), method.get());
+        let _ = query_url();
         current_page.set(1);
     });
     Effect::new(move |_| reload());
@@ -463,8 +518,18 @@ fn PaymentPage(
     } else {
         "收款订单"
     };
-    view! { <div class="page-heading"><div><h1>{title}</h1><p>{if archive{"已归档的收款交易记录"}else{"查询、跟踪和核对平台收款订单"}}</p></div><div class="heading-actions"><OrderCreator readonly=readonly on_created=Callback::new(move |_|reload())/><a class="button secondary export-link" hidden=move||!access.can(&format!("{permission_page}.export")) href=move||format!("/api/payments?archive={archive}&export=csv&q={}&status={}&method={}",url_encode(&q.get()),url_encode(&status.get()),url_encode(&method.get()))>"导出 CSV"</a></div></div>
-        <section class="panel filter-panel"><div class="filters"><label class="search-field"><span>"系统单号 / 商户单号 / 商户"</span><input prop:value=move || q.get() on:input=move |ev| set_q.set(event_target_value(&ev)) placeholder="输入关键字" /></label><label><span>"支付方式"</span><select prop:value=move || method.get() on:change=move |ev| set_method.set(event_target_value(&ev))><option>"所有支付方式"</option><option>"支付宝"</option><option>"微信支付"</option><option>"网银支付"</option></select></label><label><span>"订单状态"</span><select prop:value=move || status.get() on:change=move |ev| set_status.set(event_target_value(&ev))><option>"全部状态"</option><option>"未支付"</option><option>"处理中"</option><option>"已支付"</option><option>"支付失败"</option><option>"已关闭"</option></select></label><button class="button primary" on:click=move |_| reload()>"搜索"</button><button class="button secondary" on:click=move |_| {set_q.set(String::new());set_status.set("全部状态".into());set_method.set("所有支付方式".into());reload();}>"重置"</button></div></section>
+    view! { <div class="page-heading"><div><h1>{title}</h1><p>{if archive{"已归档的收款交易记录"}else{"查询、跟踪和核对平台收款订单"}}</p></div><div class="heading-actions"><OrderCreator readonly=readonly on_created=Callback::new(move |_|reload())/><a class="button secondary export-link" hidden=move||!access.can(&format!("{permission_page}.export")) href=move||format!("{}&export=csv",query_url())>"导出 CSV"</a></div></div>
+        <Show when=can_filter><section class="panel filter-panel"><div class="filters">
+            <access::QueryField page=permission_page permission="filter_system_id" label="系统单号" value=system_id />
+            <access::QueryField page=permission_page permission="filter_merchant_order" label="商户单号" value=merchant_order />
+            <access::QueryField page=permission_page permission="filter_merchant" label="商户" value=merchant_query />
+            <Show when=move||access.can(&format!("{permission_page}.filter_method"))><label><span>"支付方式"</span><select prop:value=move||method.get() on:change=move|ev|method.set(event_target_value(&ev))><option value="">"所有支付方式"</option><option>"支付宝"</option><option>"微信支付"</option><option>"网银支付"</option></select></label></Show>
+            <Show when=move||access.can(&format!("{permission_page}.filter_status"))><label><span>"订单状态"</span><select prop:value=move||status.get() on:change=move|ev|status.set(event_target_value(&ev))><option value="">"全部状态"</option><option>"未支付"</option><option>"处理中"</option><option>"已支付"</option><option>"支付失败"</option><option>"已关闭"</option></select></label></Show>
+            <access::QueryField page=permission_page permission="filter_from" label="开始日期" value=from kind="date" />
+            <access::QueryField page=permission_page permission="filter_to" label="结束日期" value=to kind="date" />
+            <access::QueryField page=permission_page permission="filter_channel_id" label="通道 ID" value=channel_id />
+            <button class="button primary" on:click=move |_| reload()>"搜索"</button><button class="button secondary" on:click=move |_| {system_id.set(String::new());merchant_order.set(String::new());merchant_query.set(String::new());status.set(String::new());method.set(String::new());from.set(String::new());to.set(String::new());channel_id.set(String::new());current_page.set(1);reload();}>"重置"</button>
+        </div></section></Show>
         <p class="form-error" role="alert">{move||error.get()}</p><section class="panel table-panel"><div class="table-toolbar"><div><strong>{title}</strong><small>{move || format!("共 {} 条记录",total.get())}</small><label class="auto-refresh-toggle"><input type="checkbox" prop:checked=move||auto_refresh.get() on:change=move|ev|auto_refresh.set(event_target_checked(&ev))/><span>"每5秒刷新状态"</span></label></div><button class="button secondary small-button" on:click=move |_| reload()>"↻ 刷新"</button></div><div class="table-scroll"><table><thead><tr><th>"系统单号"<small>"充值单号"</small></th><th>"商户单号"<small>"商户名称"</small></th><th>"产品名称"<small>"订单金额"</small></th><th>"通道名称"<small>"通道 ID"</small></th><th>"充值时间"<small>"回调时间"</small></th><th>"支付状态"</th><th>"收款二维码"</th><th>"操作"</th></tr></thead><tbody>
             <For each=move || payments.get() key=|o|format!("{:?}",o) let:order><tr><td><button class="id-link" on:click={let order=order.clone();move |_| set_detail.set(Some(order.clone()))}>{order.system_id.clone()}</button><small>{order.recharge_id.clone()}</small></td><td>{order.merchant_order.clone()}<small>{format!("{} · {}",order.merchant_id,order.merchant_name)}</small></td><td>{order.product_name.clone()}<small>{format!("¥ {:.2}",order.amount)}</small></td><td>{order.channel_name.clone()}<small>{format!("通道 {} · {}",order.channel_id,order.method)}</small></td><td>{order.created_at.clone()}<small>{if order.callback_at.is_empty(){"—".to_string()}else{order.callback_at.clone()}}</small></td><td><span class=status_class(order.status.as_str())>{order.status.clone()}</span><small>{if order.plugin=="wechat_jsapi"&&!order.can_pay&&order.status=="未支付"{"支付期限已过，等待确认"}else{""}}</small></td><td>{if access.can(&format!("{permission_page}.qr"))&&!order.qr_image.is_empty(){let qr=order.clone();view!{<button class="order-qr-button" on:click=move |_|qr_order.set(Some(qr.clone()))><img src=order.qr_image.clone() loading="lazy" width="44" height="44" alt="订单收款二维码预览"/><span>"查看二维码"</span></button>}.into_any()}else{view!{<small>{if order.plugin=="demo"{"模拟通道"}else{"暂无二维码"}}</small>}.into_any()}}</td><td><button class="text-button" hidden=move||!access.can(&format!("{permission_page}.query")) disabled=readonly on:click={let id=order.system_id.clone();move |_| {let id=id.clone();spawn_local(async move {match api("POST",&format!("/api/payments/{id}/query"),None).await{Ok(v)=>{match serde_json::from_value::<PaymentOrder>(v.get("order").cloned().unwrap_or(v)){Ok(latest)=>{set_notice.set(format!("订单 {}：{}",latest.merchant_order,latest.status));apply_update.run(latest)},Err(_)=>set_notice.set("订单响应格式无效".into())}},Err(e)=>set_notice.set(e)}});}} >"查单"</button><button class="text-button" on:click={let order=order.clone();move |_| set_detail.set(Some(order.clone()))}>"详情"</button></td></tr></For>
         </tbody></table><Show when=move || payments.get().is_empty()><div class="empty-state">"没有找到匹配的订单"</div></Show></div><div class="pagination"><span>{move || format!("显示 {} 条",payments.get().len())}</span><button disabled={move||current_page.get()<=1} on:click=move |_|current_page.update(|p|*p-=1)>"‹"</button><button class="page-current">{move||current_page.get()}</button><button disabled={move||current_page.get()*20>=total.get()} on:click=move |_|current_page.update(|p|*p+=1)>"›"</button><span>"本地数据库"</span></div></section>
@@ -474,10 +539,11 @@ fn PaymentPage(
 
 #[component]
 fn OrderTable(
-    orders: ReadSignal<Vec<PaymentOrder>>,
+    orders: Signal<Vec<PaymentOrder>>,
     set_detail: WriteSignal<Option<PaymentOrder>>,
 ) -> impl IntoView {
-    view! { <div class="table-scroll compact-table"><table><thead><tr><th>"系统单号"</th><th>"商户"</th><th>"产品 / 金额"</th><th>"状态"</th><th>"时间"</th></tr></thead><tbody><For each={move || orders.get().into_iter().take(5).collect::<Vec<_>>()} key=|o|format!("{:?}",o) let:order><tr><td><button class="id-link" on:click={let order=order.clone();move |_| set_detail.set(Some(order.clone()))}>{order.system_id.clone()}</button></td><td>{format!("{} · {}",order.merchant_id,order.merchant_name)}</td><td>{format!("{} · ¥ {:.2}",order.product_name,order.amount)}</td><td><span class=status_class(order.status.as_str())>{order.status.clone()}</span></td><td>{order.created_at.clone()}</td></tr></For></tbody></table></div> }
+    let access = access::access();
+    view! { <div class="table-scroll compact-table"><table><thead><tr><th>"系统单号"</th><th>"商户"</th><th>"产品 / 金额"</th><th>"状态"</th><th>"时间"</th></tr></thead><tbody><For each={move || orders.get().into_iter().take(5).collect::<Vec<_>>()} key=|o|format!("{:?}",o) let:order><tr><td>{if access.can("orders.view"){let selected=order.clone();view!{<button class="id-link" on:click=move |_|set_detail.set(Some(selected.clone()))>{order.system_id.clone()}</button>}.into_any()}else{view!{<span>{order.system_id.clone()}</span>}.into_any()}}</td><td>{format!("{} · {}",order.merchant_id,order.merchant_name)}</td><td>{format!("{} · ¥ {:.2}",order.product_name,order.amount)}</td><td><span class=status_class(order.status.as_str())>{order.status.clone()}</span></td><td>{order.created_at.clone()}</td></tr></For></tbody></table></div> }
 }
 
 #[component]
@@ -492,12 +558,34 @@ fn MerchantPage(
     set_notice: WriteSignal<String>,
 ) -> impl IntoView {
     let access = access::access();
-    let (merchant_q, set_merchant_q) = signal(String::new());
-    let (merchant_state, set_merchant_state) = signal("全部用户".to_string());
+    let merchant_q = RwSignal::new(String::new());
+    let merchant_state = RwSignal::new(String::new());
+    let refresh = move || {
+        let url = format!(
+            "/api/merchants?{}{}",
+            access.query_param("merchants", "filter_keyword", "q", &merchant_q.get()),
+            access.query_param(
+                "merchants",
+                "filter_status",
+                "enabled",
+                &merchant_state.get()
+            )
+        );
+        spawn_local(async move {
+            match api("GET", &url, None).await {
+                Ok(v) => set_merchants.set(serde_json::from_value(v).unwrap_or_default()),
+                Err(e) => {
+                    set_merchants.set(Vec::new());
+                    set_notice.set(e)
+                }
+            }
+        });
+    };
+    Effect::new(move |_| refresh());
     view! { <div class="page-heading"><div><h1>"商户列表"</h1><p>"管理接入商户、预付余额和交易权限。"</p></div><button class="button primary" hidden=move||!access.can("merchants.create") disabled=readonly on:click=move |_| set_new_merchant.set(true)>"＋ 添加商户"</button></div>
-        <section class="panel filter-panel"><div class="filters"><label><span>"商户名称 / 商户号"</span><input prop:value=move || merchant_q.get() on:input=move |ev|set_merchant_q.set(event_target_value(&ev)) placeholder="搜索商户" /></label><label><span>"用户状态"</span><select prop:value=move || merchant_state.get() on:change=move |ev|set_merchant_state.set(event_target_value(&ev))><option>"全部用户"</option><option>"正常"</option><option>"已关闭"</option></select></label><button class="button primary" on:click=move |_| {let _=merchant_q.get();} >"搜索"</button><button class="button secondary" on:click=move |_| {set_merchant_q.set(String::new());set_merchant_state.set("全部用户".into());} >"重置"</button></div></section>
-        <section class="panel table-panel"><div class="table-toolbar"><div><strong>"商户列表"</strong><small>{move || format!("共 {} 个商户",merchants.get().len())}</small></div><button class="button secondary small-button" on:click=move |_|fetch_merchants(set_merchants)>"刷新"</button></div><div class="table-scroll"><table><thead><tr><th>"商户号 / 商户名"</th><th>"今量 / 成率"</th><th>"昨量 / 成率"</th><th>"30m量"</th><th>"10m量"</th><th>"预付"</th><th>"剩余预付"</th><th>"总预付"</th><th>"状态"</th><th>"操作"</th></tr></thead><tbody>
-            <For each={move || {let query=merchant_q.get().to_lowercase();let state=merchant_state.get();merchants.get().into_iter().filter(|m|(query.is_empty()||m.name.to_lowercase().contains(&query)||m.id.to_lowercase().contains(&query))&&(state=="全部用户"||(state=="正常"&&m.enabled)||(state=="已关闭"&&!m.enabled))).collect::<Vec<_>>()}} key=|m|format!("{:?}",m) let:merchant><tr><td><strong>{merchant.id.clone()}</strong><small>{merchant.name.clone()}</small></td><td>{merchant.today_count}<small>{format!("成功率 {:.1}%",merchant.today_rate)}</small></td><td>{merchant.yesterday_count}<small>"昨日"</small></td><td>{merchant.recent30m}</td><td>{merchant.recent10m}</td><td>{format!("¥ {:.2}",merchant.prepaid)}</td><td><strong>{format!("¥ {:.2}",merchant.remaining)}</strong></td><td>{format!("¥ {:.2}",merchant.total_prepay)}</td><td><span class:badge-on=merchant.enabled class="status-badge">{if merchant.enabled{"正常"}else{"已关闭"}}</span></td><td><button class="text-button" hidden=move||!access.can("merchants.adjust") disabled=readonly on:click={let merchant=merchant.clone();move |_| {prepay_key.set(format!("{:.0}-{}",js_sys::Date::now(),js_sys::Math::random()));set_prepay_amount.set(String::new());set_prepay_merchant.set(Some(merchant.clone()));}}>"增减预付"</button><button class="text-button" hidden=move||!access.can("merchants.toggle") disabled=readonly on:click={let id=merchant.id.clone();move |_| toggle_merchant(id.clone(),set_merchants,set_notice)}>"切换状态"</button><MerchantEditor merchant=merchant.clone() readonly=!access.can("merchants.edit") on_saved=Callback::new(move |_|fetch_merchants(set_merchants))/>{if access.can("merchants.apikey"){view!{<crate::orders::MerchantApiAccess merchant_id=merchant.id.clone()/>}.into_any()}else{view!{<span></span>}.into_any()}}</td></tr></For>
+        <Show when=move||access.any(&["merchants.filter_keyword","merchants.filter_status"])><section class="panel filter-panel"><div class="filters"><access::QueryField page="merchants" permission="filter_keyword" label="商户名称 / 商户号" value=merchant_q /><Show when=move||access.can("merchants.filter_status")><label><span>"商户状态"</span><select prop:value=move||merchant_state.get() on:change=move|ev|merchant_state.set(event_target_value(&ev))><option value="">"全部状态"</option><option value="true">"正常"</option><option value="false">"已关闭"</option></select></label></Show><button class="button primary" on:click=move |_|refresh()>"搜索"</button><button class="button secondary" on:click=move |_|{merchant_q.set(String::new());merchant_state.set(String::new());refresh();}>"重置"</button></div></section></Show>
+        <section class="panel table-panel"><div class="table-toolbar"><div><strong>"商户列表"</strong><small>{move || format!("共 {} 个商户",merchants.get().len())}</small></div><button class="button secondary small-button" on:click=move |_|refresh()>"刷新"</button></div><div class="table-scroll"><table><thead><tr><th>"商户号 / 商户名"</th><th>"今量 / 成率"</th><th>"昨量 / 成率"</th><th>"30m量"</th><th>"10m量"</th><th>"预付"</th><th>"剩余预付"</th><th>"总预付"</th><th>"状态"</th><th>"操作"</th></tr></thead><tbody>
+            <For each=move||merchants.get() key=|m|format!("{:?}",m) let:merchant><tr><td><strong>{merchant.id.clone()}</strong><small>{merchant.name.clone()}</small></td><td>{merchant.today_count}<small>{format!("成功率 {:.1}%",merchant.today_rate)}</small></td><td>{merchant.yesterday_count}<small>"昨日"</small></td><td>{merchant.recent30m}</td><td>{merchant.recent10m}</td><td>{format!("¥ {:.2}",merchant.prepaid)}</td><td><strong>{format!("¥ {:.2}",merchant.remaining)}</strong></td><td>{format!("¥ {:.2}",merchant.total_prepay)}</td><td><span class:badge-on=merchant.enabled class="status-badge">{if merchant.enabled{"正常"}else{"已关闭"}}</span></td><td><button class="text-button" hidden=move||!access.can("merchants.adjust") disabled=readonly on:click={let merchant=merchant.clone();move |_| {prepay_key.set(format!("{:.0}-{}",js_sys::Date::now(),js_sys::Math::random()));set_prepay_amount.set(String::new());set_prepay_merchant.set(Some(merchant.clone()));}}>"增减预付"</button><button class="text-button" hidden=move||!access.can("merchants.toggle") disabled=readonly on:click={let id=merchant.id.clone();move |_| toggle_merchant(id.clone(),set_merchants,set_notice)}>"切换状态"</button><MerchantEditor merchant=merchant.clone() readonly=!access.can("merchants.edit") on_saved=Callback::new(move |_|refresh())/>{if access.can("merchants.apikey"){view!{<crate::orders::MerchantApiAccess merchant_id=merchant.id.clone()/>}.into_any()}else{view!{<span></span>}.into_any()}}</td></tr></For>
         </tbody></table></div></section>
     }
 }
@@ -566,27 +654,6 @@ fn fetch_dashboard(set: WriteSignal<Option<Dashboard>>) {
         }
     });
 }
-fn fetch_payments(
-    set: WriteSignal<Vec<PaymentOrder>>,
-    q: String,
-    status: String,
-    method: String,
-    archive: bool,
-) {
-    spawn_local(async move {
-        let url = format!(
-            "/api/payments?archive={archive}&q={}&status={}&method={}",
-            url_encode(&q),
-            url_encode(&status),
-            url_encode(&method)
-        );
-        if let Ok(v) = api("GET", &url, None).await {
-            if let Ok(data) = serde_json::from_value(v) {
-                set.set(data)
-            }
-        }
-    });
-}
 fn fetch_merchants(set: WriteSignal<Vec<Merchant>>) {
     spawn_local(async move {
         if let Ok(v) = api("GET", "/api/merchants", None).await {
@@ -599,15 +666,6 @@ fn fetch_merchants(set: WriteSignal<Vec<Merchant>>) {
 fn fetch_products(set: WriteSignal<Vec<Product>>) {
     spawn_local(async move {
         if let Ok(v) = api("GET", "/api/products", None).await {
-            if let Ok(data) = serde_json::from_value(v) {
-                set.set(data)
-            }
-        }
-    });
-}
-fn fetch_channels(set: WriteSignal<Vec<Channel>>) {
-    spawn_local(async move {
-        if let Ok(v) = api("GET", "/api/channels", None).await {
             if let Ok(data) = serde_json::from_value(v) {
                 set.set(data)
             }

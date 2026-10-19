@@ -26,15 +26,16 @@ import (
 )
 
 type User struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Role        string   `json:"role"`
-	Identity    string   `json:"identity"`
-	MerchantID  string   `json:"merchantId"`
-	Enabled     bool     `json:"enabled"`
-	Super       bool     `json:"super"`
-	RoleIDs     []string `json:"roleIds"`
-	Permissions []string `json:"permissions"`
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name"`
+	Role        string                 `json:"role"`
+	Identity    string                 `json:"identity"`
+	MerchantID  string                 `json:"merchantId"`
+	Enabled     bool                   `json:"enabled"`
+	Super       bool                   `json:"super"`
+	RoleIDs     []string               `json:"roleIds"`
+	Permissions []string               `json:"permissions"`
+	DataScopes  map[string][]DataScope `json:"dataScopes"`
 }
 type Store struct {
 	db       *sql.DB
@@ -121,7 +122,7 @@ func openStore(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err = db.Exec(schema + wechatSchema); err != nil {
+	if _, err = db.Exec(schema + wechatSchema + dataScopeSchema); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -177,8 +178,7 @@ func (s *Store) seed() error {
 }
 func (s *Store) audit(tx *sql.Tx, u User, r *http.Request, action, target, detail string) error {
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	_, err := tx.Exec("INSERT INTO audit(actor,action,target,detail,ip,created_at) VALUES(?,?,?,?,?,?)", u.Name, action, target, detail, ip, timestamp())
-	return err
+	return auditEvent(tx, u, action, target, detail, ip)
 }
 func (s *Store) current(r *http.Request) (User, error) {
 	c, e := r.Cookie("west_session")
@@ -208,6 +208,10 @@ func (s *Store) protect(fn func(http.ResponseWriter, *http.Request, User) error)
 			return
 		}
 
+		if e = s.scopeObject(r, u); e != nil {
+			fail(w, e)
+			return
+		}
 		if e = fn(w, r, u); e != nil {
 			fail(w, e)
 		}
